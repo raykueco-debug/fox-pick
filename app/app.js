@@ -220,8 +220,14 @@ function mood() {
   return 'normal';
 }
 
+let sayTalk = 0;
 function say(text, ms = 2600) {
   el.bubble.textContent = text;
+  if (window.Fox2D) { // the 2D fox's mouth moves while its bubble is up
+    Fox2D.talk(true);
+    clearTimeout(sayTalk);
+    sayTalk = setTimeout(() => Fox2D.talk(false), Math.min(ms, 600 + text.length * 120));
+  }
   // keep the bubble inside the stage when the fox stands near an edge
   el.bubble.style.setProperty('--bx', '0px');
   const b = el.bubble.getBoundingClientRect(), s = el.stage.getBoundingClientRect(), pad = 8;
