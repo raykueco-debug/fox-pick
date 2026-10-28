@@ -29,6 +29,7 @@
   canvas.className = 'fox2d';
   canvas.width = canvas.height = 512;
   const g = canvas.getContext('2d');
+  canvas.style.transformOrigin = '50% 92%'; // sways about the feet when the head is rubbed
   host.appendChild(canvas);
 
   const clips = {};   // name → { name, frames, exits } once loaded; null while loading / missing
@@ -37,6 +38,7 @@
   let homeLoops = 0, nextIdle = 3, action = null; // idle actions at home
   let poked = false;  // a tap asked for an action: play one as soon as the fox is home
   let rubbing = false; // a finger is rubbing the head
+  let eating = false;  // a bowl is in front of it: lean down and eat (tools/wan_eat.sh)
   let go = null;      // 'walk' (to the left) / 'walk_r' (to the right) while app.js wants the fox walking
 
   async function load(name) {
@@ -45,7 +47,8 @@
     try {
       const meta = await fetch(ROOT + name + '/meta.json', { cache: 'no-cache' }).then(r => (r.ok ? r.json() : null));
       if (!meta) return null;
-      const frames = meta.frames.map(f => { const im = new Image(); im.src = ROOT + name + '/' + f; return im; });
+      const v = meta.rev ? '?v=' + meta.rev : ''; // a new revision (tools/clip_fill.py) skips cached frames
+      const frames = meta.frames.map(f => { const im = new Image(); im.src = ROOT + name + '/' + f + v; return im; });
       // wait for the first frames (onload, not decode(): decode() can hang while the page is in the background)
       await Promise.all(frames.slice(0, 2).map(im => new Promise(ok => {
         if (im.complete) return ok();
@@ -62,7 +65,7 @@
     : name.endsWith('_turn') ? (name === 'walk_turn' ? 'walk_r' : 'walk') : name.split('_to_')[1]);
   const isAction = a => a in ACTIONS;
   const isWalk = a => a === 'walk' || a === 'walk_r';
-  const mood = () => (rubbing ? 'love' : want);
+  const mood = () => (eating && clips.eat_loop ? 'eat' : rubbing ? 'love' : want);
 
   function pickAction() {
     let ready = Object.keys(ACTIONS).filter(a => clips[`normal_to_${a}`] && clips[`${a}_to_normal`]);
@@ -177,6 +180,7 @@
     for (const c of WALK) await load(c);
     for (const m of MOODS) { await load(`${m}_loop`); await load(`normal_to_${m}`); await load(`${m}_to_normal`); }
     await load('love_loop_rub');
+    for (const c of ['normal_to_eat', 'eat_loop', 'eat_to_normal']) await load(c);
     for (const f of FACES) { await load(`walk_loop_${f}`); await load(`walk_r_loop_${f}`); }
   }
 
@@ -187,11 +191,20 @@
     },
     poke() { poked = true; },       // a tap: a random idle action next (from any mood: home first)
     rub(on) { rubbing = !!on; },    // finger rubbing the head: the petted loop until it stops
+    // the head follows the rubbing finger a little (x, y: finger offset from the head, about -1…1);
+    // nudge() with no arguments lets it settle back
+    nudge(x, y) {
+      const on = x != null;
+      canvas.style.transition = `transform ${on ? 0.12 : 0.35}s ease-out`;
+      canvas.style.transform = on ? `translate(${x * 4}px, ${y * 3}px) rotate(${x * 3}deg)` : '';
+    },
+    eat(on) { eating = !!on; },     // bowl in front: eat until it's taken away
     go(dir) { go = dir; },          // start walking / turn round ('walk' left, 'walk_r' right)
     stop() { go = null; },          // stop, turn to us and sit
     get canWalk() { return WALK.every(c => clips[c]); },
+    get canEat() { return ['normal_to_eat', 'eat_loop', 'eat_to_normal'].every(c => clips[c]); },
     get state() {
-      return { clip: cur?.name, frame: i, want, action, go, rubbing,
+      return { clip: cur?.name, frame: i, want, action, go, rubbing, eating: cur?.name === 'eat_loop',
                walking: !!go && !!cur && cur.name.startsWith(`${go}_loop`) };
     },
     ready: init().then(() => true, () => false),
