@@ -50,8 +50,8 @@
   function render() {
     const w = W() * SIZE * sizeAt(b.z);
     const home = b.mode === 'home';
-    place(ballEl, b.x, b.z, home ? 3.5 : b.h, w * (home ? 0.8 : 1));
-    if (home) ballEl.style.zIndex = layerAt(BASKET.z); // sits in the basket, behind its front rim
+    place(ballEl, b.x, b.z, home ? 5 : b.h, w * (home ? 0.75 : 1));
+    if (home) ballEl.style.zIndex = layerAt(BASKET.z) + 2; // sits in the basket's mouth, its top showing
     ballEl.style.transform = `translateX(-50%) rotate(${b.spin}deg)`;
     place(shadowEl, b.x, b.z, 0, w * Math.max(0.4, 1 - b.h / 30));
     shadowEl.style.zIndex = layerAt(b.z);

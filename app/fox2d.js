@@ -20,6 +20,7 @@
                     lick: 1.5, scratch: 2, chase_tail: 1.5, belly: 1, sneeze: 1, play_bow: 1.5, sniff: 1.5,
                     jump_joy: 1, think: 1, bored: 1, hug_tail: 1.5, shy: 1,
                     clap: 1, peekaboo: 1.5, blow_kiss: 1, dance: 1, beg: 1, roll: 1.5,
+                    sit_back: 1.5, rest: 1, look_back: 1, stretch_up: 1, look_down_l: 1.5, look_down_r: 1.5,
                     paw: 0, wave: 0, nod: 0, shake_no: 0, shake_dry: 0, hungry: 0, shiver: 0, proud: 0 }; // weights (0: only on cue, Fox2D.play)
   const FACES = ['ahead', 'happy', 'up', 'back']; // walk loop variants; the plain loop plays most
   const WALK = ['normal_to_walk', 'normal_to_walk_r', 'walk_loop', 'walk_r_loop', 'walk_turn', 'walk_r_turn',

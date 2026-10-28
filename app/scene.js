@@ -102,6 +102,37 @@
   stage.appendChild(front);
   stage.querySelector('.hill')?.remove();
 
+  // props on the 2.5D ground (art: assets/scene/props/, the GPT sheet assets/source/gpt/props_01.png): each stands
+  // at a depth, so it hides and is hidden by the fox and the ball like they hide each other (app.js groundAt /
+  // sizeAt / layerAt). Beyond z 1 is behind where the fox can go. Once they load, they replace the drawn
+  // mid and props layers.
+  const PROPS = [ // picture, x %, depth, width as a share of the stage width (at depth 0)
+    ['pine', 20, 1.25, 0.26], ['pine', 80, 1.3, 0.24], ['tree', 6, 1.12, 0.46], ['tree', 95, 1.08, 0.5],
+    ['bush', 32, 1.05, 0.22], ['bush', 68, 1.06, 0.2], ['flowers', 58, 0.75, 0.13],
+    ['stump', 11, 0.3, 0.2], ['rock', 93, 0.45, 0.16], ['mushrooms', 70, 0.12, 0.12], ['flowers', 26, 0.02, 0.15],
+  ];
+  Promise.all([...new Set(PROPS.map(p => p[0]))].map(n => new Promise((ok, no) => {
+    const im = new Image(); im.onload = () => ok(); im.onerror = no; im.src = `assets/scene/props/${n}.png`;
+  }))).then(() => {
+    const els = PROPS.map(([n, x, z, w]) => {
+      const d = document.createElement('img');
+      d.className = 'prop';
+      d.src = `assets/scene/props/${n}.png`;
+      d.alt = '';
+      stage.appendChild(d);
+      return [d, x, z, w];
+    });
+    const place = () => els.forEach(([d, x, z, w]) => {
+      d.style.left = x + '%';
+      d.style.bottom = groundAt(z) - 1.5 + '%';
+      d.style.width = stage.clientWidth * w * sizeAt(z) + 'px';
+      d.style.zIndex = layerAt(z);
+    });
+    place();
+    addEventListener('resize', place);
+    layers.mid.style.display = layers.props.style.display = 'none';
+  }, () => {});
+
   // slide the layers against each other: with the fox's position, and with the tablet's tilt
   const wrap = document.getElementById('petWrap');
   let tilt = 0;
