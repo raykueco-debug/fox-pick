@@ -390,6 +390,7 @@ const actions = {
 };
 
 function onPetTap() {
+  if (rubbed) { rubbed = false; return; } // the finger was rubbing, not tapping
   if (S.sleeping) { say(t('dontWake')); return; }
   const now = Date.now();
   if (now - lastPet < 600) return;
@@ -406,6 +407,44 @@ function onPetTap() {
   else if (r < 0.3) { setExpr('curious', 1400); say(t('what')); }
   else { setExpr('love', 1300); if (Math.random() < 0.4) say(pick(t('petLines'))); }
   save();
+}
+
+/* 2D fox: keep a finger on it and rub round and round → it's petted (eyes closed, head rubbing) for as long
+   as the finger keeps moving; a plain tap stays a tap */
+let rubbed = false;
+function bindRub() {
+  if (RENDER !== 'anim') return;
+  let down = null, path = 0, lastMove = 0, rubbing = false, timer = 0, fxAt = 0;
+  const end = () => {
+    down = null;
+    clearInterval(timer);
+    if (rubbing) { rubbing = false; Fox2D.rub(false); save(); }
+  };
+  el.fox.addEventListener('pointerdown', e => {
+    if (!window.Fox2D || S.sleeping) return;
+    down = { x: e.clientX, y: e.clientY };
+    path = 0;
+    lastMove = Date.now();
+    el.fox.setPointerCapture(e.pointerId);
+    clearInterval(timer);
+    timer = setInterval(() => { if (rubbing && Date.now() - lastMove > 500) end(); }, 100); // finger stopped
+  });
+  el.fox.addEventListener('pointermove', e => {
+    if (!down) return;
+    path += Math.hypot(e.clientX - down.x, e.clientY - down.y);
+    down = { x: e.clientX, y: e.clientY };
+    lastMove = Date.now();
+    if (!rubbing && path > 60) { rubbing = rubbed = true; Fox2D.rub(true); userWalkUntil = Date.now() + 8000; }
+    if (rubbing && Date.now() - fxAt > 900) { // hearts and a little bond while it lasts
+      fxAt = Date.now();
+      const p = petPos();
+      spawnFx(pick(['💗', '💕']), p.x + rand(-8, 8), p.y - 4);
+      S.stats.fun = clamp(S.stats.fun + 1);
+      addBond(1);
+    }
+  });
+  el.fox.addEventListener('pointerup', end);
+  el.fox.addEventListener('pointercancel', end);
 }
 
 /* ================= behaviour loop ================= */
@@ -611,6 +650,7 @@ function hatch() {
 function bind() {
   document.querySelectorAll('.actions button').forEach(b => b.addEventListener('click', () => { actions[b.dataset.act](); render(); }));
   el.fox.addEventListener('click', onPetTap);
+  bindRub();
   bindWalk();
   document.querySelectorAll('#tailCtl button').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); setTailsByHand(+b.dataset.d); }));
   $('#hatchBtn').addEventListener('click', hatch);

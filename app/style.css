@@ -126,7 +126,7 @@ html, body {
 .shadow { width: 55%; height: 12px; margin: -14px auto 0; background: #0000001f; border-radius: 50%; }
 
 /* fox = tails layer behind + body sprite */
-.fox { position: relative; width: 100%; aspect-ratio: 1; transition: transform .25s; }
+.fox { position: relative; width: 100%; aspect-ratio: 1; transition: transform .25s; touch-action: none; } /* rubbing must not scroll */
 .fox.flip { transform: scaleX(-1); }
 .fox.anim2d.flip { transform: none; } /* the 2D fox turns round in its own clips: never mirrored */
 .fox-body, .tails { position: absolute; inset: 0; width: 100%; height: 100%; }
