@@ -21,6 +21,8 @@ const RENDER_3D = RENDER === '3d';
 const RATES_AWAKE = { hunger: -6, fun: -5, energy: -3, clean: -3 };
 const RATES_SLEEP = { hunger: -3, fun: -1, energy: +18, clean: -1 };
 const MAX_CATCHUP_H = 48;
+// energy: a fling costs FLING_ENERGY; under FLING_LEAST the fox would rather rest (sleep) or eat (a meal gives EAT_ENERGY back)
+const FLING_ENERGY = 10, FLING_LEAST = 0, EAT_ENERGY = 10; // (FLING_LEAST 0 while it's being tried out: no limit; 20 after)
 
 // sprite layout (fractions of the square sprite canvas) — tuned to GPT's D01/B01 sprites
 const TAIL_ROOT = { x: 0.54, y: 0.92 };
@@ -157,6 +159,7 @@ function defaultState() {
     name: '', hatched: false, age: 0, last: now,
     stats: { hunger: 80, fun: 80, energy: 85, clean: 100 },
     bond: 0, sleeping: false, poops: [], nextPoop: now + rand(2, 4) * 36e5 / SPEED, tails: 1,
+    pantry: { meat: 0, veg: 0, water: 0 }, // (what the parent sent, kept till the child feeds it)
   };
 }
 function load() {
@@ -171,8 +174,10 @@ function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e
 let S = load();
 
 const weeks = () => FORCE_WEEK || Math.floor(S.age / (7 * DAY)) + 1;
-// tailsOverride: set by hand with the tail buttons on the stage (0 = follow the weeks)
-const tailCount = () => S.tailsOverride || clamp(weeks(), 1, 9);
+// its level: one a week (tailsOverride: set by hand with the buttons on the stage, 0 = follow the weeks) — no more
+// tails to grow: a level is one more dash in the fling game (fling.js); tailCount: the pictures' set, up to t9
+const level = () => S.tailsOverride || Math.max(1, weeks());
+const tailCount = () => Math.min(9, level());
 function currentStage() { const t = tailCount(); return STAGES.find(s => t <= s.maxTails); }
 
 /* advance the world by real elapsed time (scaled by SPEED) */
@@ -256,6 +261,7 @@ function petPos() {
 /* tails: fan behind the body; each tail sways around its root */
 function renderTails() {
   const n = tailCount();
+  window.Fox2D?.tails(n); // (the 2D clips: it draws them itself where a clip has none of its own)
   if (n === renderedTails) return;
   if (renderedTails > 0 && n > renderedTails) window.Fox2D?.play('proud'); // a new tail: chest out
   renderedTails = n;
@@ -292,6 +298,9 @@ function fanAngles(n) {
 function holdLocks() { for (const k in S.locks || {}) if (S.locks[k]) S.stats[k] = 100; }
 function render() {
   holdLocks();
+  const best = S.fling?.best; // the mini game's farthest (fling.js keeps it in this save), on its button
+  $('#gameBest').hidden = !best;
+  if (best) $('#gameBest').textContent = `${best}m`;
   for (const k in S.stats) {
     const v = S.stats[k];
     const bar = document.querySelector(`.stat[data-k="${k}"] .bar i`);
@@ -300,13 +309,13 @@ function render() {
     document.querySelector(`.ff[data-ff="${k}"]`)?.classList.toggle('on', !!S.locks?.[k]);
   }
   el.name.textContent = S.name || t('foxName');
-  const n = tailCount(), wk = weeks();
-  el.tailBadge.textContent = t('tails', { n });
+  const n = level(), wk = weeks();
+  el.tailBadge.textContent = t('level', { n });
   $('#tailN').textContent = n;
   $('#tailCtl').classList.toggle('manual', !!S.tailsOverride);
   const days = Math.floor(S.age / DAY);
   const toNext = 7 - (S.age / DAY) % 7;
-  el.age.textContent = `${t('week', { w: wk })} · ` + (n >= 9 ? t('nineDone') : t('nextTail', { t: toNext < 1 ? t('hours', { n: Math.ceil(toNext * 24) }) : t('days', { n: Math.ceil(toNext) }) }));
+  el.age.textContent = `${t('week', { w: wk })} · ` + t('nextLevel', { t: toNext < 1 ? t('hours', { n: Math.ceil(toNext * 24) }) : t('days', { n: Math.ceil(toNext) }) });
   el.growBar.style.width = (n >= 9 ? 100 : ((S.age / DAY) % 7) / 7 * 100) + '%';
 
   const st = currentStage();
@@ -426,6 +435,7 @@ async function eat(kind) {
   }
   const m = MEALS[kind];
   S.stats.hunger = clamp(S.stats.hunger + m.hunger);
+  S.stats.energy = clamp(S.stats.energy + EAT_ENERGY); // (a meal: some energy back)
   if (m.fun) S.stats.fun = clamp(S.stats.fun + m.fun);
   S.stats.clean = clamp(S.stats.clean - 2);
   addBond(2);
@@ -454,7 +464,26 @@ async function eat(kind) {
 }
 
 const actions = {
-  game() { save(); location.href = 'runner.html'; }, // the mini game (runner.js)
+  game() { // the mini game, in a layer of its own over the pet (fling.js); the rhythm run, runner.html, from the menu
+    if (S.stats.energy < FLING_LEAST) { say(t('tooTiredToPlay'), 3000); setExpr('tired', 2200); return; } // (rest or a meal first)
+    save();
+    homeMusic.pause();
+    // (the loading screen first, its pictures coming in; the tap in opens it — and goes fullscreen, where it can)
+    Preload.run({ title: '小狐飛多遠', load: p => Fling.preload(p), go: () => Fling.open({
+      level: level(), best: S.fling?.best || 0,
+      energy: { // a fling costs some energy, ended; under FLING_LEAST it'd rather go home and rest or eat
+        get: () => Math.round(S.stats.energy), least: FLING_LEAST,
+        spend: () => { S.stats.energy = clamp(S.stats.energy - FLING_ENERGY); save(); return Math.round(S.stats.energy); },
+      },
+      onEnd: r => { // home with it: the stars, the farthest, a bit of fun
+        S.stars = (S.stars || 0) + r.stars;
+        S.fling = { best: r.best, plays: (S.fling?.plays || 0) + 1 };
+        S.stats.fun = clamp(S.stats.fun + 8);
+        save(); render();
+      },
+      onClose: () => Preload.run({ title: S.name || '小狐', go: () => { render(); homeMusic.play().catch(() => {}); } }), // (and back, the same)
+    }) });
+  },
   feed() {
     if (RENDER === 'anim') { el.foodPick.hidden = !el.foodPick.hidden; return; } // meat, veggies or water? (eat: too full)
     if (S.stats.hunger >= 95) { say(t('full')); setExpr('meh', 1500); return; }
@@ -463,6 +492,7 @@ const actions = {
     spawnFx(f.e, p.x, p.y + 8, 'drop');
     setTimeout(() => {
       S.stats.hunger = clamp(S.stats.hunger + f.hunger);
+      S.stats.energy = clamp(S.stats.energy + EAT_ENERGY);
       if (f.fun) S.stats.fun = clamp(S.stats.fun + f.fun);
       S.stats.clean = clamp(S.stats.clean - 2);
       addBond(2);
@@ -504,8 +534,7 @@ const actions = {
     } else {
       if (S.stats.energy > 80) { say(t('notSleepy')); setExpr('play', 1500); return; }
       S.sleeping = true;
-      say(t('goodnight'));
-      walk2d(BED.x, BED.z + 0.02); // off to its bed first (2D fox), then it dozes off and curls up
+      say(t('goodnight')); // (it dozes off and curls up where it is: no bed in the scene now)
     }
     save();
     render();
@@ -619,13 +648,10 @@ const sizeAt = z => 1 - DEPTH.shrink * z;
 const layerAt = z => 10 + Math.round((1 - z) * 80);                // z-index
 const zFromY = y => { const r = el.stage.getBoundingClientRect(); return clamp(((r.bottom - y) / r.height * 100 - DEPTH.near) / (DEPTH.far - DEPTH.near) * 100) / 100; };
 let foxX = 50, foxZ = 0;
-const BED = { x: 20, z: 0.5 }; // its cushion in the scene (scene.js draws it here): it goes there to sleep
 // things on the ground the fox and the ball meet (scene.js draws them; x %, z, and their half size on the ground
-// rx %, rz): a soft one is walked over and gives under a weight (the bed); a solid one, h % high, would be
-// walked round and bounce the ball off it
-const THINGS = [
-  { name: 'bed', x: BED.x, z: BED.z + 0.04, rx: 13, rz: 0.08, soft: true },
-];
+// rx %, rz): a soft one is walked over and gives under a weight; a solid one, h % high, would be walked round and
+// bounce the ball off it — none now (the bed taken out)
+const THINGS = [];
 const within = (t, x, z, mx = 0, mz = 0) => ((x - t.x) / (t.rx + mx)) ** 2 + ((z - t.z) / (t.rz + mz)) ** 2 < 1;
 const pressed = { fox: 0, ball: 0 }; // how far each sinks into a soft thing now (% of the stage height; scene.js)
 const sinkAt = (x, z, k = 1) => { // standing on a soft thing: sinks in, most in the middle
@@ -692,7 +718,7 @@ function paceNow() {
 }
 function walkStep() {
   const st = Fox2D.state;
-  const move = (x, z) => { foxX += x; foxZ += z; walkDir = { x, z }; placeFox(); };
+  const move = (x, z) => { if (Fox2D.state.moves !== 'walk') return; foxX += x; foxZ += z; walkDir = { x, z }; placeFox(); }; // (only on a walk loop: fox2d.js moves)
   if (walkTarget == null || walkTarget.last) {
     if (st.stride && walkDir) {
       const w = walkTarget; // on its last stride: just onto the spot; called off: on as it was going
@@ -751,8 +777,8 @@ function bindWalk() {
 }
 
 function setTailsByHand(d) {
-  S.tailsOverride = d === 0 ? 0 : clamp(tailCount() + d, 1, 9);
-  S.tails = tailCount();
+  S.tailsOverride = d === 0 ? 0 : clamp(level() + d, 1, 99);
+  S.level = level();
   save();
   loadAssets().then(render);
 }
@@ -772,31 +798,61 @@ function chatter() {
 }
 
 function tick() {
-  const before = S.tails;
+  const before = S.level || level(), art = tailCount();
   simulate(Date.now());
-  const now = tailCount();
-  S.tails = now;
-  if (now > before) celebrateTail(now);
-  if (now !== before) loadAssets().then(render); // each tail count has its own whole-fox art
+  const now = level();
+  S.level = now;
+  if (now > before) celebrateLevel(now);
+  if (tailCount() !== art) loadAssets().then(render); // (the pictures' set)
   render();
 }
 
-function celebrateTail(n) {
+function celebrateLevel(n) {
   const p = petPos();
   setExpr('happy', 2500);
-  say(n === 9 ? t('nineTails') : t('newTail', { n }), 3500);
+  say(t('levelUp', { n }), 3500);
   for (let i = 0; i < 10; i++) setTimeout(() => spawnFx(pick(['✨', '🌟', '🦊']), p.x + rand(-25, 25), p.y + rand(-5, 20)), i * 120);
 }
 
-/* ================= parent link (prototype backend: server.py) =================
-   The parent page schedules speech and sends gifts; the child page polls its inbox. */
-const FAMILY = (params.get('family') || localStorage.getItem('ipet-family') || 'demo').replace(/[^A-Za-z0-9]/g, '').slice(0, 12) || 'demo';
+/* ================= parent link =================
+   The parent page (parent.html) sends food to this pet's pairing code; the pet asks every few seconds whether there's
+   anything new — through Supabase (link.js) when it's set up, else server.py's /api on the LAN (which also carries
+   the parent's speech). The code: made up here once, at random (shown in the settings for the parent to type in). */
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // (no 0/O, 1/I: read off a screen and typed in)
+const newCode = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), b => CODE_CHARS[b % CODE_CHARS.length]).join('');
+const FAMILY = (params.get('family') || (localStorage.getItem('ipet-family') !== 'demo' && localStorage.getItem('ipet-family')) || newCode()).replace(/[^A-Za-z0-9]/g, '').slice(0, 12) || newCode();
 try { localStorage.setItem('ipet-family', FAMILY); } catch (e) {}
-const inbox = { queue: [], busy: false, unlocked: false, since: Number(localStorage.getItem('ipet-inbox-since')) || 0 };
+const inbox = { queue: [], busy: false, unlocked: false, since: Number(localStorage.getItem('ipet-inbox-since')) || 0,
+  after: localStorage.getItem('ipet-inbox-after') }; // (Supabase: the last event's id seen; none yet — start from now)
 let talkTimer = 0;
+
+// pairing a parent: the parent page's link with this code in it (parent.js keeps it), as a QR code to scan with a
+// phone's camera, or sent (the share sheet; else copied)
+const PARENT_URL = new URL(`parent.html?family=${FAMILY}`, location.href).href;
+function showPairing() {
+  if (window.qrcode) try {
+    const q = qrcode(0, 'M');
+    q.addData(PARENT_URL); q.make();
+    $('#pairQr').innerHTML = q.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  } catch (e) {}
+  $('#pairShare').addEventListener('click', async () => {
+    if (navigator.share) try { await navigator.share({ title: t('p_title'), url: PARENT_URL }); return; } catch (e) { if (e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(PARENT_URL); say(t('pairCopied'), 3000); } catch (e) { prompt('', PARENT_URL); }
+  });
+}
 
 async function pollInbox() {
   if (!S.hatched) return;
+  if (window.Link?.on) { // Supabase
+    try {
+      const rows = await Link.inbox(FAMILY, inbox.after == null ? null : Number(inbox.after));
+      if (inbox.after == null) inbox.after = rows.at(-1)?.id ?? 0; // (first time: from now on, not what was sent before)
+      else for (const r of rows) { inbox.queue.push({ type: 'gift', item: r.item, from: r.sender, at: Date.parse(r.created_at) }); inbox.after = r.id; }
+      try { localStorage.setItem('ipet-inbox-after', inbox.after); } catch (e) {}
+      processInbox();
+    } catch (e) {} // offline: the pet still works on its own
+    return;
+  }
   try {
     const r = await fetch(`api/inbox?family=${FAMILY}&since=${inbox.since}`, { cache: 'no-store' });
     if (!r.ok) return;
@@ -825,12 +881,27 @@ async function processInbox() {
   setTimeout(processInbox, 600);
 }
 
-function receiveGift(ev) {
+// food from the parent (meat, veggies, water): they're told who it's from, and it's eaten as a meal is
+const GIFT_FOOD = { meat: '🍖', veg: '🥕', water: '💧' };
+async function receiveGift(ev) {
+  if (ev.item in GIFT_FOOD) { // into the pantry: the child decides when it's eaten (📦, pantryOpen)
+    S.pantry = { meat: 0, veg: 0, water: 0, ...S.pantry };
+    S.pantry[ev.item]++; save(); renderPantry();
+    say(t('giftStored', { from: ev.from || t('parents'), e: GIFT_FOOD[ev.item] }), 3500);
+    setExpr('happy', 1500); addBond(3);
+    $('#pantryBtn')?.classList.remove('bump'); void $('#pantryBtn')?.offsetWidth; $('#pantryBtn')?.classList.add('bump');
+    await wait(2500);
+    return;
+  }
+  return receiveOld(ev);
+}
+function receiveOld(ev) { // (the old snacks, an emoji each: from server.py)
   const f = FOODS.find(x => x.e === ev.item) || { e: ev.item, hunger: 20 };
   const p = petPos();
   spawnFx(f.e, p.x, p.y + 8, 'drop');
   return new Promise(res => setTimeout(() => {
     S.stats.hunger = clamp(S.stats.hunger + f.hunger);
+    S.stats.energy = clamp(S.stats.energy + EAT_ENERGY);
     if (f.fun) S.stats.fun = clamp(S.stats.fun + f.fun);
     addBond(3);
     setExpr('eat', 1800);
@@ -839,6 +910,24 @@ function receiveGift(ev) {
     save();
     setTimeout(res, 2200);
   }, 650));
+}
+
+// the pantry: what the parent sent, a count of each; the child opens it and feeds the fox one of them (then it's gone)
+function renderPantry() {
+  const p = { meat: 0, veg: 0, water: 0, ...S.pantry }, n = p.meat + p.veg + p.water;
+  if ($('#pantryCount')) $('#pantryCount').textContent = n;
+  $('#pantryBtn')?.classList.toggle('has', n > 0);
+  const list = $('#pantryList'); if (!list) return;
+  list.innerHTML = n ? Object.keys(GIFT_FOOD).filter(k => p[k]).map(k =>
+    `<button data-k="${k}"><span class="e">${GIFT_FOOD[k]}</span><span>${t('food_' + k)} × ${p[k]}</span><b>${t('feedThis')}</b></button>`).join('')
+    : `<p>${t('pantryEmpty')}</p>`;
+}
+function pantryFeed(k) {
+  if (!S.pantry?.[k] || eating) return;
+  if (k !== 'water' && S.stats.hunger >= 95) { say(t('full')); setExpr('meh', 1500); return; } // (too full: it stays in the box)
+  $('#pantry').classList.add('hidden');
+  S.pantry[k]--; save(); renderPantry();
+  if (k === 'water') drink(); else eat(k);
 }
 
 async function speak(ev) {
@@ -854,7 +943,16 @@ async function speak(ev) {
   addBond(2);
 }
 
+// the pet's own music, round and round on its screen (PeriTune, peritune.com) — from the first touch (browsers want
+// one), paused while the mini game has its own
+const homeMusic = Sound.music('assets/music/PerituneMaterial_Laid_Back3_loop.m4a'); // (sound.js: brought to the same loudness as the rest, on iPhones too)
+// started by a tap the browser counts as one (a click, a touch let go — on a phone a touch going down isn't: the
+// music was refused there, and with the one try spent it never came): the loading screen's tap in, else the next
+// tap; tried on each until it's playing
+let musicOn = false;
 function unlockAudio() {
+  if (!musicOn && !document.querySelector('.fl:not([hidden]), .splash:not(#splash)')) // (not under the game, nor going to or from it: there, the loading screen's tap starts the right one)
+    homeMusic.play()?.then?.(() => { musicOn = true; }).catch(() => {});
   if (inbox.unlocked) return;
   PetVoice.unlock();
   inbox.unlocked = true;
@@ -906,7 +1004,35 @@ function bind() {
     S.locks = { ...S.locks, [b.dataset.ff]: !S.locks?.[b.dataset.ff] };
     render(); save();
   }));
-  $('#runnerBtn').addEventListener('click', () => { save(); location.href = 'runner.html'; }); // the mini game (runner.js)
+  // landscape only, fullscreen where the phone lets it (no browser bars, to and from the fling game too): from a tap, as fling.js does
+  if (matchMedia('(pointer: coarse)').matches) document.addEventListener('pointerdown', () => {
+    if (document.fullscreenElement || matchMedia('(display-mode: fullscreen)').matches) return;
+    const fs = document.documentElement.requestFullscreen?.({ navigationUI: 'hide' });
+    Promise.resolve(fs).then(() => screen.orientation?.lock?.('landscape')).catch(() => {});
+  }, true);
+  // installed (Android: the browser's own offer, kept for the button): the whole app fullscreen, no bars between pages
+let installAsk = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installAsk = e; $('#installBtn').hidden = false; });
+addEventListener('appinstalled', () => { $('#installBtn').hidden = true; });
+$('#installBtn').addEventListener('click', () => {
+  if (!installAsk) { $('#iosAdd').classList.remove('hidden'); return; } // (iPhone: Safari has no install offer — how to add it by hand)
+  installAsk.prompt(); installAsk = null; $('#installBtn').hidden = true;
+});
+$('#iosAddOk').addEventListener('click', () => $('#iosAdd').classList.add('hidden'));
+// iPhone / iPad in Safari (not opened from the home screen): no fullscreen for pages there, so the button shows how
+if ((/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) && !navigator.standalone) $('#installBtn').hidden = false;
+// the screen's own height, measured: on a phone it settles a moment after opening, turning round or going fullscreen,
+// and 100dvh can be read too soon (or isn't there on older ones) — the page then sat short of the screen
+function fitScreen() { document.documentElement.style.setProperty('--app-h', Math.round(window.visualViewport?.height || innerHeight) + 'px'); }
+function fitSoon() { fitScreen(); for (const ms of [100, 300, 700, 1500]) setTimeout(fitScreen, ms); }
+for (const ev of ['resize', 'orientationchange', 'pageshow', 'fullscreenchange', 'webkitfullscreenchange']) addEventListener(ev, fitSoon);
+document.addEventListener('fullscreenchange', fitSoon); window.visualViewport?.addEventListener('resize', fitScreen);
+fitSoon();
+// (while it's tried out: beside the version, whether it's running as the home-screen app or in the browser)
+{ const mode = document.createElement('span'); mode.className = 'ver';
+  const show = () => { mode.textContent = navigator.standalone || matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches ? '· App' : document.fullscreenElement ? '· 全螢幕' : '· 瀏覽器'; };
+  $('#ver')?.after(mode); show(); document.addEventListener('fullscreenchange', show); setInterval(show, 2000); }
+$('#runnerBtn').addEventListener('click', () => { save(); location.href = 'runner.html'; }); // the mini game (runner.js)
   $('#renameBtn').addEventListener('click', () => {
     const n = prompt(t('renamePrompt'), S.name);
     if (n && n.trim()) { S.name = n.trim().slice(0, 10); save(); render(); }
@@ -943,14 +1069,16 @@ function bind() {
     js.src = 'fox3d.js';
     document.head.appendChild(js);
   }
-  document.addEventListener('pointerdown', unlockAudio, { once: true });
+  addEventListener('ipet-in', unlockAudio); // (preload.js: the loading screen tapped — a click)
+  for (const ev of ['click', 'pointerup', 'keydown']) document.addEventListener(ev, unlockAudio);
   $('#familyCode').textContent = FAMILY;
+  showPairing();
   I18N.apply();
   document.querySelectorAll('[data-lang]').forEach(b => b.addEventListener('click', () => { I18N.set(b.dataset.lang); render(); }));
   await loadAssets();
   if (!S.hatched) $('#intro').classList.remove('hidden');
   simulate(Date.now());
-  S.tails = tailCount();
+  S.level = level();
   render();
   setInterval(tick, 1000);
   setInterval(save, 5000);
@@ -962,3 +1090,9 @@ function bind() {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 })();
+
+// the pantry's button and panel (📦: the parent's food, fed when the child likes)
+$('#pantryBtn')?.addEventListener('click', () => { renderPantry(); $('#pantry').classList.remove('hidden'); });
+$('#pantryClose')?.addEventListener('click', () => $('#pantry').classList.add('hidden'));
+$('#pantryList')?.addEventListener('click', e => { const b = e.target.closest('button[data-k]'); if (b) pantryFeed(b.dataset.k); });
+renderPantry();

@@ -41,7 +41,7 @@
   const W = () => stage.clientWidth, H = () => stage.clientHeight;
   function place(elm, x, z, h, w) {
     elm.style.left = x + '%';
-    elm.style.bottom = groundAt(z) + h - (h ? 0 : sinkAt(x, z, 0.5)) + '%'; // sinks into the soft bed a little
+    elm.style.bottom = groundAt(z) + h - (h ? 0 : sinkAt(x, z, 0.5)) + '%'; // sinks into a soft thing a little (none now)
     elm.style.width = w + 'px';
     elm.style.zIndex = layerAt(z) + 1;
   }
@@ -50,7 +50,7 @@
     const home = b.mode === 'home';
     ballEl.style.display = home ? 'none' : ''; // put away: in the 玩耍 button, not in the scene
     homeBtn?.classList.toggle('ball-out', !home);
-    pressed.ball = !home && !b.h ? sinkAt(b.x, b.z, 0.5) : 0; // (scene.js: the bed gives under it)
+    pressed.ball = !home && !b.h ? sinkAt(b.x, b.z, 0.5) : 0; // (scene.js: a soft thing gives under it)
     if (home) { shadowEl.style.opacity = 0; return; }
     place(ballEl, b.x, b.z, b.h, w);
     ballEl.style.transform = `translateX(-50%) rotate(${b.spin}deg)`;
@@ -219,6 +219,7 @@
     const move = ev => { drag.push({ t: performance.now(), x: ev.clientX, y: ev.clientY }); if (drag.length > 8) drag.shift(); hold(ev); };
     const up = ev => {
       removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up);
+      if (!drag) return; // (let go over the ball itself: its own pointerup has thrown it already)
       const moved = Math.hypot(ev.clientX - drag[0].x, ev.clientY - drag[0].y) > 20;
       if (moved) return letGo(ev);
       drag = null; // a tap: it drops in front of the fox, and the fox goes for it
@@ -354,7 +355,7 @@
   async function leapIn(clip, dist, run) {
     if (!(await until(() => Fox2D.state.clip === clip, run, 4000))) return;
     let done = 0;
-    while (Fox2D.state.clip === clip && run === fetchRun) {
+    while (Fox2D.state.clip === clip && Fox2D.state.moves === 'jump' && run === fetchRun) { // (only on the pounce itself: fox2d.js moves)
       const u = Math.min(1, Math.max(0, (Fox2D.state.frame / Fox2D.state.frames - 0.3) / 0.5));
       const to = dist * (1 - Math.cos(u * Math.PI)) / 2;
       foxX = Math.max(4, Math.min(96, foxX + to - done));

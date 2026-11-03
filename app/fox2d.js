@@ -64,17 +64,27 @@
   let watching = false, gaze = 0;
   let running = false; // after the ball: the bounding run (walk[_r]_loop_run) instead of walking
 
+  // its tails: the clips made again without a tail (assets/fox/clips_notail, docs/tailless.md) where there are, and
+  // all its tails (as many as it has) drawn on them from where the tail grows in each frame (assets/fox/tail_roots.json)
+  const NOTAIL = 'assets/fox/clips_notail/', MULTI = false; // (put off for now: the clips as WAN drew them, tail and all)
+  let ROOTS = {}, PIVOT = [0.5, 1]; // (PIVOT: the point of a tail picture on its root, as parts of its side — set in tools/tail_anchor.html)
+  const json = u => fetch(u, { cache: 'no-cache' }).then(r => (r.ok ? r.json() : {})).catch(() => ({}));
+  Promise.all([json('assets/fox/tail_roots.json'), json('assets/fox/tail_anchors.json')]).then(([j, hand]) => { ROOTS = anchored(j, hand); PIVOT = hand._pivot || PIVOT; });
+  const TAIL_IMG = Array.from({ length: 9 }, (_, k) => { const im = new Image(); im.src = `assets/fox/tail/t${k + 1}.png`; return im; });
+  let tailN = 1;
+
   async function load(name, wait = false) { // wait: until its first frames are in (the first clip only)
     if (clips[name] !== undefined) return clips[name];
     clips[name] = null;
     try {
-      const meta = await fetch(ROOT + name + '/meta.json', { cache: 'no-cache' }).then(r => (r.ok ? r.json() : null));
+      let root = NOTAIL, meta = MULTI && await fetch(NOTAIL + name + '/meta.json', { cache: 'no-cache' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+      if (!meta) { root = ROOT; meta = await fetch(ROOT + name + '/meta.json', { cache: 'no-cache' }).then(r => (r.ok ? r.json() : null)); }
       if (!meta) return null;
       const v = meta.rev ? '?v=' + meta.rev : ''; // a new revision (tools/clip_fill.py) skips cached frames
       // pictures are fetched only when the clip is needed (fetch()): ~150 clips × ~20 frames at once jammed the
       // server and would cost a tablet some 60 MB up front
-      const frames = meta.frames.map(f => { const im = new Image(); im.dataset.src = ROOT + name + '/' + f + v; return im; });
-      clips[name] = { name, frames, exits: meta.exits || [], near: meta.near || [], pace: meta.speed || 0 };
+      const frames = meta.frames.map(f => { const im = new Image(); im.dataset.src = root + name + '/' + f + v; return im; });
+      clips[name] = { name, frames, exits: meta.exits || [], near: meta.near || [], pace: meta.speed || 0, notail: root === NOTAIL };
       if (wait) await fetchFrames(clips[name], 2);
     } catch (e) { clips[name] = null; }
     return clips[name];
@@ -94,6 +104,9 @@
     })));
   }
 
+  // what a clip may move the fox by (the rule: no going anywhere unless its legs are): walk — its walk loops (the
+  // feet stepping), jump — a pounce's way in (off the ground, landing further on); none — every other clip
+  const moveTag = name => /^walk(_r|_front|_back)?_loop/.test(name) ? 'walk' : /_to_pounce(_r)?$/.test(name) ? 'jump' : null;
   const isLoop = name => name.includes('_loop');
   const endsOn = name => (isLoop(name) ? name.split('_loop')[0]
     : name.endsWith('_turn') ? (name === 'walk_turn' ? 'walk_r' : 'walk') : name.split('_to_')[1]);
@@ -210,6 +223,7 @@
     if (name === cur.name) { i = 0; return; } // keep looping
     if (switchTo(name, skip)) return;
     // that clip isn't there yet: keep looping where the fox is (no jump) until it is; else back home
+    if (!(name in clips)) console.warn(`fox2d: no clip ${name} (after ${cur.name}): falling back — a break in the chain`);
     for (const alt of [`${endsOn(cur.name)}_loop`, 'normal_loop']) if (switchTo(alt, false)) return;
     i = 0;
   }
@@ -224,6 +238,9 @@
       return;
     }
     if (hold > 0) { hold--; return; }
+    // down in the crouch with the ball held up, no look clips to play there (taken out): held on its picture, still
+    // — not off to a loop it hasn't got (which fell back to sitting: down, up, down again as long as it was held)
+    if (endsOn(cur.name) === 'ready' && watching && !clips[LOOK.r] && !isLoop(cur.name)) return;
     const act = endsOn(cur.name);
     if (isAction(act) && !go) { // at an action's pose: its own loop a round or two, if it has one
       if (!isLoop(cur.name) && clips[`${act}_loop`]) { holdLoops = 1 + (Math.random() < 0.5 ? 1 : 0); switchTo(`${act}_loop`, true); return; }
@@ -257,7 +274,86 @@
     const f = cur.frames[i];
     if (!f.complete || !f.naturalWidth) return; // keep the last picture rather than a blank
     g.clearRect(0, 0, 512, 512);
+    const r = cur.notail && shown() > 0.02 && ROOTS['clips_notail/' + cur.name]?.[i];
+    const over = r && r[4] === 'over'; // (seen from behind: its tails over its back)
+    if (r && !over) tails(r, f);
     g.drawImage(f, 0, DROP, 512, 512);
+    if (r && over) tails(r, f);
+  }
+  // never down past its feet: the lowest the fox goes in each frame (found once a picture) and each tail picture's
+  // shape (a few of its points); a tail that would go lower is turned, a little at a time, until it doesn't
+  const feetOf = new WeakMap(), shapeOf = new WeakMap(), probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  probe.canvas.width = probe.canvas.height = 64;
+  function alpha(im) { probe.clearRect(0, 0, 64, 64); probe.drawImage(im, 0, 0, 64, 64); return probe.getImageData(0, 0, 64, 64).data; }
+  function feet(im) { // (in its 512px picture)
+    if (!feetOf.has(im)) {
+      const d = alpha(im), solid = y => { for (let x = 0; x < 64; x++) if (d[(y * 64 + x) * 4 + 3] > 128) return true; return false; };
+      let y = 64; while (y > 0 && !solid(y - 1)) y--;
+      feetOf.set(im, y * 8);
+    }
+    return feetOf.get(im);
+  }
+  function shape(im) { // (as parts of its side, from the root at its bottom middle)
+    if (!shapeOf.has(im)) {
+      const d = alpha(im), pts = [];
+      for (let y = 0; y < 64; y += 2) for (let x = 0; x < 64; x += 2) if (d[(y * 64 + x) * 4 + 3] > 128) pts.push([(x + 1) / 64, (y + 1) / 64]);
+      shapeOf.set(im, pts);
+    }
+    return shapeOf.get(im);
+  }
+  function above(im, deg, L, y0, floor) { // (deg: how it's turned; y0: its root, floor: its feet — on the canvas)
+    const pts = shape(im), low = a => { const s = Math.sin(a * Math.PI / 180), c = Math.cos(a * Math.PI / 180); let m = -1; for (const [x, y] of pts) m = Math.max(m, (x - PIVOT[0]) * s + (y - PIVOT[1]) * c); return y0 + m * L; };
+    if (low(deg) <= floor) return deg;
+    const step = low(deg - 2) < low(deg + 2) ? -2 : 2;
+    for (let k = 0; k < 90 && low(deg) > floor; k++) deg += step;
+    return deg;
+  }
+  const ONE = 40; // one tail: slanting up this much from upright, away from its body (until set by hand)
+  function lean(im) { // (how far round the way a tail picture goes leans, from its root: drawn turned back by it)
+    const pts = shape(im); let x = 0, y = 0;
+    for (const p of pts) { x += p[0] - PIVOT[0]; y += p[1] - PIVOT[1]; }
+    return pts.length ? Math.atan2(x, -y) * 180 / Math.PI : 0;
+  }
+  // the ways they go, in turn round the fan: all swaying together (each a little of its own, never past the next),
+  // turned up off the floor, and none then past the next one round (they may lie over each other, not cross)
+  function fanned(ways, ims, t, quick, L, y0, floor) {
+    const gap = ways.length > 1 ? Math.abs(ways[1] - ways[0]) : 0, own = Math.min(3, gap * 0.3);
+    const all = quick ? Math.sin(t * 19) * 6 + Math.sin(t * 31) * 3 : Math.sin(t * 2.2) * 5;
+    const out = ways.map((a, j) => {
+      const w = a + all + own * Math.sin(t * (quick ? 23 : 1.7) + j * 1.9), d = ims[j] ? lean(ims[j]) : 0;
+      return ims[j] ? above(ims[j], w - d, L, y0, floor) + d : w;
+    });
+    for (let j = 1; j < out.length; j++) out[j] = Math.max(out[j], out[j - 1]);
+    return out.map((a, j) => a - (ims[j] ? lean(ims[j]) : 0)); // (as each is to be turned)
+  }
+  // asleep, its tails tucked away: none on sleep_loop (…_dream too), drawn in going to sleep, out again waking
+  function shown() {
+    const n = cur.name, u = i / Math.max(1, cur.frames.length - 1);
+    return /^sleep_loop/.test(n) ? 0 : /_to_sleep$/.test(n) ? 1 - u : /^sleep_to_/.test(n) ? u : 1;
+  }
+  // fanned out from the root around the way it goes; each its own pace of sway — slow sitting, quick on the move
+  function tails(r, pic) {
+    const n = tailN, t = performance.now() / 1000, k = 512 / 480;
+    const quick = /_loop_run|_loop$|^walk/.test(cur.name) && /walk|run/.test(cur.name);
+    // f: how much it faces us (tools/tail_roots.py) — then, the more tails the more so, fanned out wide to both sides
+    // round straight up from behind its hips, bigger, to show past its big head; side on, round the way its own went
+    const f = (typeof r[4] === 'number' ? r[4] : 0) * Math.min(1, (n - 1) / 2), mix = (a, b) => a + (b - a) * f;
+    const mid = r.length > 5 ? r[2] : mix(r[2], 5), lift = 40 * f; // (set by hand: as set)
+    const spread = Math.min(mix(124, 200), mix(17, 50) * (n - 1)) * (r[6] ?? 1), L = 512 * mix(0.42, 0.55) * Math.pow(0.85, Math.floor((n - 1) / 3)) * (r[5] ?? 1) * shown(); // (× as set by hand; tucked away asleep)
+    const ways = n === 1 ? [r.length > 5 ? r[2] : r[2] < 0 ? -ONE : ONE] : Array.from({ length: n }, (_, j) => mid - spread / 2 + spread * j / (n - 1)); // (r.length > 5: set by hand)
+    const order = ways.map((a, j) => j).sort((a, b) => Math.abs(ways[b] - mid) - Math.abs(ways[a] - mid));
+    const floor = feet(pic) + DROP, h = r.length > 5 ? 0 : 1; // (set by hand: right where it was put)
+    const x0 = (r[0] - 51 * f * h) * k, y0 = (r[1] + (72 * f - lift) * h) * k + DROP;
+    const ims = ways.map((a, j) => { const im = TAIL_IMG[j % 9]; return im.complete && im.naturalWidth ? im : null; });
+    const turn = fanned(ways, ims, t, quick, L, y0, floor);
+    g.save(); g.beginPath(); g.rect(-512, -512, 1536, floor + 512); g.clip(); // (and should one still reach down past them)
+    for (const j of order) {
+      const im = ims[j]; if (!im) continue;
+      g.save(); g.translate(x0, y0); g.rotate(turn[j] * Math.PI / 180); // (facing us: from its hips' middle)
+      g.drawImage(im, -L * PIVOT[0], -L * PIVOT[1], L, L);
+      g.restore();
+    }
+    g.restore();
   }
 
   function tick() {
@@ -296,6 +392,9 @@
   }
 
   window.Fox2D = {
+    tails(n) { tailN = Math.max(1, Math.min(9, n | 0)); }, // how many tails it has (app.js)
+    get hasTails() { return !!cur?.notail; },              // drawing them itself, on this clip
+    get clip() { return cur ? `${cur.name}:${i}` : ''; },   // (what's playing, and its frame: to look into)
     set({ mood: m }) {
       want = MAP[m] || 'normal';
       if (want !== 'normal') { load(`normal_to_${want}`); load(`${want}_loop`); load(`${want}_to_normal`); }
@@ -317,7 +416,7 @@
     nudge(x, y) {
       const on = x != null;
       canvas.style.transition = `transform ${on ? 0.12 : 0.35}s ease-out`;
-      canvas.style.transform = on ? `translate(${x * 4}px, ${y * 3}px) rotate(${x * 3}deg)` : '';
+      canvas.style.transform = on ? `rotate(${x * 3}deg)` : ''; // (leaning into it only: not moved, its legs aren't going)
     },
     eat(on) { eating = !!on; },     // bowl in front: eat until it's taken away
     drink(on) { drinking = !!on; }, // at the water bowl: lap until it's had enough
@@ -326,7 +425,7 @@
     run(on) { running = !!on; },
     watch(on) { watching = !!on; if (!on) gaze = 0; }, // the ball held up: look up at it, the head after it
     look(g) { gaze = Math.max(-1, Math.min(1, g)); },
-    get canWatch() { return ['normal_to_ready', 'ready_to_normal', 'ready_to_walk', 'ready_to_walk_r', LOOK.r].every(c => clips[c]); },    // chasing the ball: run, not walk
+    get canWatch() { return ['normal_to_ready', 'ready_to_normal'].every(c => clips[c]); }, // (its looks and its bursts off after it, where there are)    // chasing the ball: run, not walk
     get canWalk() { return WALK.every(c => clips[c]); },
     // toward / away from the viewer: walk loops, ways in and out, and turns to and from side-on
     get canWalkDepth() {
@@ -346,9 +445,30 @@
                view: cur ? endsOn(cur.name) : null, // the picture it is on, or on its way to
                facing: !cur ? 0 : (a => a === 'walk_r' || (a.endsWith('_r') && MOVES.includes(a.slice(0, -2))) ? 1
                  : a === 'walk' || MOVES.includes(a) ? -1 : 0)(endsOn(cur.name)),
+               moves: cur ? moveTag(cur.name) : null, // (walk / jump: the only clips it may be moved on — app.js, ball.js)
                stride: !!cur && /^walk(_r|_front|_back)?_loop/.test(cur.name) && !cur.name.endsWith('_push'),
                strideLeft: cur ? (cur.exits.find(k => k >= i) ?? cur.frames.length - 1) - i : 0 };
     },
     ready: init().then(() => true, () => false),
   };
 })();
+
+// the tail roots set by hand (tools/tail_anchor.html → assets/fox/tail_anchors.json: a few frames of a clip each,
+// [x, y, angle, facing us, size, fan, over]: size and fan ×, 1 as found; over 1: tails over it, turned away) in place of those found (tools/tail_roots.py): every frame as far off the found root as the anchors around it are, so it moves with the fox
+function anchored(roots, hand) {
+  for (const [clip, keys] of Object.entries(hand || {})) {
+    const ks = Object.keys(keys).map(Number).sort((a, b) => a - b), auto = roots[clip];
+    if (!ks.length || !auto) continue;
+    roots[clip] = auto.map((r, i) => {
+      const a = ks.filter(k => k <= i).pop() ?? ks[0], b = ks.find(k => k >= i) ?? a, A = keys[a], B = keys[b];
+      const u = a === b ? 0 : (i - a) / (b - a), at = j => A[j] + (B[j] - A[j]) * u;
+      // (where it is and the way it goes: as far off the found root as at the anchors, so it moves with the fox)
+      const off = (K, k) => { const q = auto[k] || r; return [K[0] - q[0], K[1] - q[1], ((K[2] - q[2] + 540) % 360) - 180]; };
+      const oa = off(A, a), ob = off(B, b), by = j => oa[j] + (ob[j] - oa[j]) * u;
+      const f = A.length > 6 ? (A[6] ? 'over' : at(3)) : r[4] === 'over' ? 'over' : A.length > 3 ? at(3) : r[4]; // (A[6]: its tails over it, or not)
+      const k = j => (A.length > j ? at(j) : 1);
+      return [r[0] + by(0), r[1] + by(1), r[2] + by(2), true, f, k(4), k(5)];
+    });
+  }
+  return roots;
+}

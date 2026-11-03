@@ -1,0 +1,1731 @@
+/* 小狐飛多遠 — a launch-and-bounce game (a prototype).
+   The fox is flung off a bent branch (tap when the swing is high: the harder, the farther) and flies to the right.
+   On the ground lie forest friends, and landing on one throws it on its own way: a rabbit bounces it (and runs ahead past two
+   friends, knocking the first away, stopping by the second: off that one, a bunny bounce), a bear sends it high, a frog hops it along (and its next dive bounces
+   high off the ground), an owl carries it, a boar runs it forward, a mushroom springs it up, a squirrel sets it gliding (till it dives or lands) —
+   a hedgehog only slows it (dived onto, it springs it up as a mushroom does and rolls off along the ground, knocking
+   flying whoever it meets). Knocked flying, a friend goes off up and back, out of sight for good; a boar that's run
+   on, or a hedgehog, once out of sight, are gone too. Its dashes, one a level of the pet's: a tap while rising, off up and on at a slant (a burst of rainbow stars); a tap while falling is a
+   dive down at a slant (onto the next friend), free. It bounces on the plain ground less and less, rolls, and stops: that's how far.
+   Stars in the air on the way (more the higher it flies) go home with it (with the farthest it has gone, kept in the pet's own save); every
+   SUPER of them caught, the next friend it lands on is a super bounce, off far and high.
+   Flung high enough (SKY.height), it goes up onto the clouds: a run along a cloud road, seen from behind (left /
+   right for a lane, stars on them), bounding along, SKY.run m of it, then a leap off its end and, through black,
+   down onto a giraffe, flying on.
+   Cards (a roguelike run, CARDS): one of three picked before the fling, and one more of three at each cloud road's
+   end (picked, off it jumps) — friends stronger or more often, gliding or bouncing off them, and special ones; this run only.
+   World: x metres along, y metres up (the ground at 0), seen from the side.
+   It plays in a layer of its own, landscape only (fullscreen and locked where the phone lets it; held upright, it
+   asks to be turned), on a stage of one fixed size and shape (STAGE, 16:9) scaled to fit the screen, so every
+   phone sees the same stretch of the world; opened by the pet (app.js: Fling.open with its level, farthest and what to
+   do with the stars it brings home) or on a page of its own (fling.html). */
+(function () {
+  const params = new URLSearchParams(location.search);
+  // the look: the sunny day (B01), or Halloween night (B03: pumpkins, a dark forest, the moon, now and then bats
+  // flying by far off, its own music) — picked with the 🎃 / ☀️ button by ✕ (kept), else Halloween from mid-October
+  // to its day; ?bg=day / ?bg=halloween to try one
+  const LOOKS = {
+    day: { music: 'assets/music/PerituneMaterial_Battle_Fun_loop.m4a', dir: 'assets/bg', lip: 0.25, sky: ['#8fd0ff', '#e6f6ff'], soil: '#9b7653', clouds: ['#8fd0ff', '#ffe6f2', '#e9e4ff'] },
+    halloween: { music: 'assets/music/Peritune_Magic_Skirmish_loop.m4a', dir: 'assets/bg/halloween', lip: 0.64, tree: { cx: 0.539, cut: 0.326, w: 0.28 }, friends: 'assets/friends/halloween', sky: ['#1b1440', '#4b3a7a'], soil: '#3b2638', clouds: ['#1b1440', '#6a4f96', '#3a2f6e'], night: true },
+  };
+  let LOOK = LOOKS[params.get('bg')] || LOOKS[(() => { try { return localStorage.getItem('ipet-fling-look'); } catch (e) { return null; } })()] || (() => {
+    const d = new Date(), m = d.getMonth(), day = d.getDate();
+    return m === 9 && day >= 15 ? LOOKS.halloween : LOOKS.day;
+  })();
+  function setLook(look) { // (the button: everything the look draws from, loaded afresh)
+    LOOK = look;
+    try { localStorage.setItem('ipet-fling-look', look === LOOKS.halloween ? 'halloween' : 'day'); } catch (e) {}
+    looking = Promise.all([loadBG(), loadFriends()]).catch(() => {}); loadTree(); lookUI(); bats.length = 0;
+    bgm?.pause(); bgm = null; if (!layer.hidden) music();
+  }
+  let looking = Promise.resolve(); // (the look's pictures listed, once it's changed)
+  const G = 20;                        // gravity, m/s²
+  const PACE = +params.get('pace') || 0.8; // the whole game played this much slower than real time (easier on young eyes)
+  // the fling: the fox pulled back on the little tree's top (dragged from anywhere), let go to fly the other way —
+  // how far it's pulled the speed (min..max m/s), the way it's pulled the angle (within deg, up and to the right)
+  const PULL = { rest: [0, 2.4], max: 2.6, least: 0.35, deg: [5, 80] };
+  const LAUNCH = { min: 12, max: 42 };
+  const DASH = { up: [6, 8], down: [2, -16] };     // up: a tail's dash [vx +, vy +]; down: a dive, as many as it likes [vx + (once a dive), vy at least]
+  const DIVE_BOOST = 1.3;                          // diving onto a friend: its throw this much stronger
+  const GROUND = { keep: 0.5, dive: 0.7, fade: 0.75, drag: 0.72, roll: 9 }; // a plain bounce keeps this of vy (dived down onto it: dive), this of vx; rolling slows by roll m/s²
+  // — and never higher than fade of the bounce off the ground before (a dive speeds it down, but each bounce is lower: till a friend's throw)
+  // how hard each extra throw is, over a tail's dash (DASH.up, ~10 m/s): a super bounce (stars) = a bunny bounce (the
+  // friend a rabbit ran ahead to) > a combo (onto a friend from a friend, the ground not touched between) > a tail.
+  // A super / bunny bounce is the friend's own throw made stronger: boost times as fast, as long (an owl's carry, a
+  // boar's ride), more hops off a frog; a hedgehog springs it up and rolls off as if dived onto
+  const SUPER = { stars: 10, boost: 1.6, hops: 2 }; // stars for a super bounce; how much stronger; frog hops more
+  const COMBO = 13;                                // a combo: this many m/s more, on the way the friend throws it
+  const RABBIT = { run: 16, by: 1.4 };             // landed on, a rabbit runs ahead (at least this fast, m/s) to stand by the next friend
+  // a frog landed on: the next dive onto the plain ground (only a dive) springs back, keeping this of its fall and at
+  // least up m/s (6 m high) — once, then it takes another frog (two frogs before it are still once)
+  const FROG = { keep: 0.6, up: 16 };
+  const CAM = { metres: 7, least: 0.56 };          // the screen's height in metres on the ground; drawn smaller as the fox climbs, down to this of it; above, an arrow
+  // stars: a column every step m, a chance in each band m — more the higher, and none above what the screen shows zoomed out
+  const STARS = { step: 4, band: 1.5, low: 1.5, top: 0.84 * CAM.metres / CAM.least * (1 - 0.2 / 0.84) - 0.6 };
+  // up past height m: off up onto the clouds, a run of run m along a cloud road (the fox seen from behind, three
+  // lanes, stars on them), at speed m/s; at its end down off the cloud from drop m, onto a giraffe, and on
+  const SKY = { height: 150, run: 500, speed: 40, drop: 22, hop: 0.7, intro: 0.8 }; // (hop: s a bound along the clouds; intro: s out of the cloud, up and down onto it, before the run)
+  // the cloud road winds over the lanes, a lane wide; each bend: its edge on the side it goes to out over the next
+  // lane first (over turn m), both lanes cloud a while (both m: the time to change lane), then its other edge in
+  // after it. Off it (an edge past the fox's middle), the fox falls
+  const FALL_IN = (-0.4 + Math.sqrt(0.16 + 4 * 9 * 0.9)) / 18; // (s off the edge: down to the sea of cloud, 0.9 lanes below — see the fall's lift)
+  const ROADEND = { cards: 7, brake: 22 }; // (braking to a stop over the road's last <brake> m; the cards floating <cards> m past its end, over the
+  // sea of cloud — a tap on one, and off it leaps to it)
+  const SKYSTARS = { first: 30, gap: 26, run: 5, step: 3, full: 0.9 }; // (its stars: a row of <run> along a lane every <gap> m; <full> of them a full bar: a gold card for sure)
+  const TIER_COLOR = { blue: ['#5aa2ff', '#2f6fe0'], purple: ['#b07cff', '#7a45d8'], gold: ['#ffd25a', '#e59a1c'] };
+  const FADE = 1; // s: into and out of the clouds, through black (half out, half in)
+  const AUTO = params.has('auto');
+  const SOAR = { fall: 2.5 }; // gliding off a squirrel: falling no faster than this, m/s
+  const FOX_H = 1.7;                   // the fox's drawn height, m
+  // a throw at an angle (the bear's belly, the owl's carry, the giraffe's neck): all as strong, only the angle theirs —
+  // the fox's own speed, at least min, and add more
+  const THROW = { min: 20, add: 4 };
+  const throwAt = (f, deg) => {
+    const v = Math.max(Math.hypot(f.vx, f.vy), THROW.min) + THROW.add, a = deg * Math.PI / 180;
+    f.vx = v * Math.cos(a); f.vy = v * Math.sin(a);
+  };
+  // the friends — h: how high it stands, m; w: how often; hit: what it does to the fox (and the fox's pose after);
+  // (say: what it does, in words — for whoever reads this)
+  const FRIENDS = {
+    rabbit:   { e: '🐰', h: 0.9, w: 30, say: '彈一下，往前跑撞飛一隻、停在下一隻旁邊：碰到牠 BUNNY BOUNCE', hit: f => { f.vy = 10; f.vx = Math.max(f.vx, 8) + 1; return 'boing'; } },
+    frog:     { e: '🐸', h: 0.7, w: 14, say: '連跳三下＋之後俯衝落地彈更高', hit: f => { f.vy = 7; f.vx += 1; f.hops = 3; return 'hop'; } },
+    mushroom: { get e() { return LOOK.night ? '🫕' : '🍄'; }, h: 1.1, w: 10, say: '彈超高', hit: f => { f.vy = 19; f.vx += 2; return 'spring'; } },
+    bear:     { e: '🐻', h: 1.3, r: 1.1, w: 8, say: '挺著大肚子睡覺：65° 彈飛', draw: drawBear, hit: f => { throwAt(f, 65); return 'belly'; } },
+    owl:      { e: '🦉', h: 1.2, w: 8,  say: '抓著 25° 斜飛', hit: f => { throwAt(f, 25); f.glide = 1.2; return 'whoosh'; } },
+    giraffe:  { e: '🦒', h: 2.7, w: 8,  say: '用脖子 45° 甩出去', draw: drawGiraffe, hit: f => { throwAt(f, 45); f.hold = NECK.hold; return 'fling'; } },
+    boar:     { e: '🐗', h: 1.0, w: 10, say: '背著往前衝', hit: f => { f.vy = 0; f.vx = Math.max(f.vx, 16) + 3; f.ride = 1; return 'whoosh'; } },
+    hedgehog: { e: '🦔', h: 0.7, w: 14, say: '踩到被絆倒、變慢（俯衝撲到才會彈高）', hit: f => { f.vx *= 0.55; f.vy = 4; return 'ouch'; } },
+    squirrel: { e: '🐿️', h: 0.8, w: 9,  say: '彈一下，然後滑翔（俯衝或落地才停）', hit: f => { f.vy = 10; f.vx = Math.max(f.vx, 8) + 1; f.soar = true; return 'soar'; } },
+  };
+  const KINDS = Object.keys(FRIENDS), WSUM = KINDS.reduce((a, k) => a + FRIENDS[k].w, 0);
+  const ONLY = FRIENDS[params.get('friend')] && params.get('friend'); // (?friend=squirrel: all of one kind, to try it)
+  const pickKind = () => { // (cards may make some friends come more often)
+    if (ONLY) return ONLY;
+    const w = k => FRIENDS[k].w * (1 + (S?.mods.weight[k] || 0)), sum = KINDS.reduce((a, k) => a + w(k), 0);
+    let r = Math.random() * sum; for (const k of KINDS) if ((r -= w(k)) < 0) return k; return 'rabbit';
+  };
+
+  // the cards (a roguelike run): three to pick one from before the fling, and three more at each cloud road's end
+  // (picked, off it jumps) — all of them for this run only, adding up. Blue, purple, gold: commoner to rarer, stronger.
+  // Each drawn as what it's about, big (a friend, the fox, a star…), with a badge for what it does (💪 stronger, 🎲 more
+  // often, 🪂 gliding, 🦘 bouncing, …) and the amount in big letters — seen at a glance, no reading needed.
+  // when: 'start' only before the fling (no use after it); apply(m, S): onto the run's mods
+  const TIER = { blue: { w: 60, name: '藍' }, purple: { w: 30, name: '紫' }, gold: { w: 10, name: '金' } };
+  const NAME = { rabbit: '兔子', frog: '青蛙', get mushroom() { return LOOK.night ? '魔女缸' : '蘑菇'; }, bear: '熊', owl: '貓頭鷹', giraffe: '長頸鹿', boar: '山豬', hedgehog: '刺蝟', squirrel: '松鼠' };
+  const mods = () => ({ power: {}, weight: {}, glide: {}, hops: {}, noTrip: 0, noKnock: 0, refill: 0, again: 0, magnet: 0, superLess: 0,
+    launch: 0, dive: 0, ground: 0, combo: 0, shield: 0 });
+  const CARDS = [];
+  const card = (id, tier, icon, badge, val, name, apply, when) => CARDS.push({ id, tier, icon, badge, val, name, apply, when, art: id.replace(/-(blue|purple|gold)$/, '') });
+  // its picture, drawn for it (assets/cards/<art>.png: the three tiers of a card share one), where there is one — else its emoji
+  const CARD_ART = {};
+  const CARD_ART_NIGHT = {}; // (on Halloween: the friends in their costumes, where drawn — assets/cards/halloween/)
+  const artOf = c => { const ok = im => im?.complete && im.naturalWidth ? im : null; return (LOOK.night && ok(CARD_ART_NIGHT[c.art])) || ok(CARD_ART[c.art]); };
+  async function loadCardArt() { // (those there: assets/cards[/halloween]/index.json, tools/card_split.py)
+    await Promise.all([['assets/cards', CARD_ART], ['assets/cards/halloween', CARD_ART_NIGHT]].map(async ([dir, into]) => {
+      const r = await fetch(`${dir}/index.json`).catch(() => null), names = r?.ok ? await r.json() : [];
+      await Promise.all(names.map(n => new Promise(done => { const im = pic(); im.onload = im.onerror = done; im.src = `${dir}/${n}.png`; into[n] = im; })));
+    }));
+    if (pickHand && !$('pick').hidden) $('pickRow').innerHTML = pickHand.map(cardHTML).join(''); // (cards out already, before their pictures were in)
+  }
+  const THROWERS = ['rabbit', 'frog', 'mushroom', 'bear', 'owl', 'giraffe', 'boar', 'squirrel'];
+  const fe = k => () => FRIENDS[k].e; // (its emoji as the look has it: the mushroom a pot on Halloween night)
+  for (const k of THROWERS) {
+    // 加強: its throw stronger (adds up)
+    [['blue', 0.1], ['purple', 0.15], ['gold', 0.2]].forEach(([t, v]) =>
+      card(`power-${k}-${t}`, t, fe(k), '💪', `+${Math.round(v * 100)}%`, () => `${NAME[k]}力量`, m => { m.power[k] = (m.power[k] || 0) + v; }));
+    // 機率: comes along more often (+20 / 30 / 40%: its picture, three of it, and the words — no figure)
+    [['blue', 0.2], ['purple', 0.3], ['gold', 0.4]].forEach(([t, v]) =>
+      card(`more-${k}-${t}`, t, fe(k), '', '', () => `${NAME[k]}更常出現`, m => { m.weight[k] = (m.weight[k] || 0) + v; }));
+    // 功能: glides off it (as off a squirrel), bounces on after it (as after a frog)
+    if (k !== 'squirrel') card(`glide-${k}`, 'purple', fe(k), '🪂', '滑翔', () => `${NAME[k]}彈完會滑翔`, m => { m.glide[k] = 1; });
+    if (k !== 'frog') card(`hops-${k}`, 'blue', fe(k), '🦘', '跳跳', () => `${NAME[k]}之後再彈 2 下`, m => { m.hops[k] = (m.hops[k] || 0) + 2; });
+  }
+  // 特殊
+  card('noTrip', 'purple', () => '🦔', '🚫', '不絆倒', () => '刺蝟不絆腳（踩到就彈起來）', m => { m.noTrip = 1; });
+  card('noKnock', 'blue', () => '🐰', '🤝', '不撞飛', () => '兔子跑過去不撞飛朋友', m => { m.noKnock = 1; });
+  card('refill', 'blue', () => '🔥', '♻️', '+1', () => '噴射用完回復一次', m => { m.refill++; });
+  card('again', 'purple', () => '🦊', '↗️', '再跳', () => '停下來後再往前跳一次', m => { m.again++; });
+  // (more of them)
+  card('magnet', 'blue', () => star(), '🧲', '吸更遠', () => `${star()}離遠一點也吃得到`, m => { m.magnet += 0.6; });
+  card('superLess', 'purple', () => '🌈', '⭐', '−3', () => 'SUPER BOUNCE 少集 3 顆', m => { m.superLess += 3; });
+  card('superNow', 'gold', () => '🌈', '⚡', '馬上', () => 'SUPER BOUNCE 立刻準備好', (m, S) => { S.ready = true; });
+  [['blue', 0.1], ['purple', 0.15], ['gold', 0.25]].forEach(([t, v]) =>
+    card(`launch-${t}`, t, () => '🌳', '🚀', `+${Math.round(v * 100)}%`, () => '樹枝彈射更遠', m => { m.launch += v; }, 'start'));
+  card('dive', 'blue', () => '🦊', '⬇️', '+20%', () => '俯衝撲到朋友更強', m => { m.dive += 0.2; });
+  card('ground', 'purple', () => '🟫', '⤴️', '彈更高', () => '落在地上彈得更高', m => { m.ground += 0.1; });
+  card('combo', 'purple', () => '✨', '🔗', 'COMBO+', () => '連續踩朋友加更多速度', m => { m.combo += 6; });
+  card('shield', 'gold', () => '☁️', '🛡️', '救一次', () => '雲路上掉下去救回來一次', m => { m.shield++; });
+  card('tails', 'gold', () => '🔥', '➕', '+2', () => '多兩次噴射', m => { m.refill += 2; });
+
+  function deal(when, weights = null, first = null) { // three different cards: each a tier drawn by its rarity (or by <weights>), then a card of it
+    const pool = CARDS.filter(c => !c.when || c.when === when), hand = [];
+    if (first) { const of = pool.filter(c => c.tier === first); hand.push(of[Math.floor(Math.random() * of.length)]); }
+    const W = weights || Object.fromEntries(Object.entries(TIER).map(([t, v]) => [t, v.w])), sum = Object.values(W).reduce((a, b) => a + b, 0);
+    while (hand.length < 3) {
+      let r = Math.random() * sum, tier = 'blue';
+      for (const t in W) if ((r -= W[t]) < 0) { tier = t; break; }
+      const of = pool.filter(c => c.tier === tier && !hand.includes(c));
+      if (of.length) hand.push(of[Math.floor(Math.random() * of.length)]);
+    }
+    return hand;
+  }
+  // the cloud road's three, by how full its star bar got (0…1): full, a gold one for sure; the fewer, the lower
+  const dealSky = k => deal('cloud', { blue: 10 + 90 * (1 - k), purple: k < 0.3 ? 0 : 50 * k, gold: k < 0.6 ? 0 : 30 * k }, k >= 1 ? 'gold' : null);
+  const cardHTML = (c, i) => `<button class="fl-cd fl-${c.tier}" data-i="${i}"><span class="fl-cd-ic">${artOf(c) ? `<img src="${artOf(c).src}" alt="">` : c.icon()}${c.badge && !artOf(c) ? `<i>${c.badge}</i>` : ''}</span>
+    ${c.val ? `<b>${c.val}</b>` : ''}<small>${c.name()}</small><em>${TIER[c.tier].name}卡</em></button>`;
+  let pickHand = null;
+  function pick(when, then) { // the three, laid out: the one tapped is the run's (and then on)
+    const hand = pickHand = deal(when), el = $('pick');
+    $('pickTitle').textContent = when === 'start' ? '選一張卡出發！' : '選一張卡跳下去！';
+    $('pickRow').innerHTML = hand.map(cardHTML).join('');
+    el.hidden = false; S.picking = true;
+    el.onclick = e => {
+      const b = e.target.closest('.fl-cd'); if (!b || !S) return;
+      const c = hand[+b.dataset.i];
+      el.onclick = null; el.hidden = true; S.picking = false;
+      c.apply(S.mods, S); S.deck.push(c); SFX.card(c.tier); deckUI(); hud();
+      then?.();
+    };
+  }
+  function deckUI() { // the run's cards, small, along the bottom
+    $('deck').innerHTML = S.deck.map(c => `<span class="fl-chip fl-${c.tier}" title="${c.name()}">${c.icon()}<i>${c.badge}</i></span>`).join('');
+  }
+
+  // its dashes (one a level) and its farthest: from whoever opens it (the pet), else (on its own page) this browser's own
+  let DASHES = 1, best = 0, opts = {};
+  const MULTI = false; // (its tails drawn by the game, as many as it has, on pictures without one: put off for now — the pictures as WAN drew them, tail and all)
+
+  // the layer: canvas, counters along the top, the end card (no instructions: it's found out by playing)
+  const layer = document.createElement('div');
+  layer.className = 'fl'; layer.hidden = true;
+  layer.innerHTML = `<div class="fl-stage"><canvas></canvas>
+    <div class="fl-hud"><span class="fl-pill fl-dist"><span data-k="dist">0</span> m</span>
+      <span class="fl-pill fl-speed">💨 <span data-k="speed">0</span> km/h</span>
+      <span class="fl-pill fl-stars" data-k="starPill"><b data-k="starIcon">⭐</b> <span data-k="stars">0</span><span class="fl-meter"><i data-k="meterBar"></i></span></span>
+      <span class="fl-pill" data-k="frogPill" hidden>🐸</span>
+      <div class="fl-tails" data-k="tails"></div><button class="fl-x" data-k="mute" aria-label="靜音">🔊</button><button class="fl-x fl-look" data-k="look" aria-label="換普通版或萬聖節版">🎃</button><button class="fl-x" data-k="close" aria-label="回到小狐">✕</button></div>
+    <div class="fl-deck" data-k="deck"></div>
+    <div class="fl-card fl-pick" data-k="pick" hidden><div><h1 data-k="pickTitle">選一張卡</h1><div class="fl-cds" data-k="pickRow"></div></div></div>
+    <div class="fl-card" data-k="end" hidden><div>
+      <h1 data-k="endTitle">飛好遠！</h1>
+      <div class="fl-big"><span data-k="final">0</span> m</div>
+      <p data-k="endNote"></p>
+      <p class="fl-energy" data-k="energyNote" hidden></p>
+      <button data-k="again">再飛一次</button><button class="fl-ghost" data-k="home">回到小狐</button>
+    </div></div></div>
+    <div class="fl-upright"><span>📱</span>把手機轉成橫的來玩！<button data-k="close2">回到小狐</button></div>`;
+  const $ = k => layer.querySelector(`[data-k="${k}"]`);
+  const star = () => LOOK.night ? '🍬' : '⭐'; // (what's caught along the way: on Halloween night, sweets)
+  function lookUI() { // (the counters in the look's colours, and the button showing the other look)
+    layer.classList.toggle('fl-night', !!LOOK.night); $('starIcon').textContent = star();
+    $('look').textContent = LOOK.night ? '☀️' : '🎃';
+  }
+  lookUI();
+  const muteIcon = () => { $('mute').textContent = window.Sound?.muted ? '🔇' : '🔊'; };
+  muteIcon();
+  $('mute').addEventListener('click', () => { window.Sound?.mute(); muteIcon(); }); // (all of it: the music and the effects, kept)
+  $('look').addEventListener('click', () => { // (the other look: its pictures through the loading screen, as going in and out)
+    const to = LOOK.night ? LOOKS.day : LOOKS.halloween;
+    setLook(to);
+    window.Preload?.run({ title: to.night ? '萬聖節' : '白天', load: p => preload(p), go: () => { if (bgm?.paused) bgm.play().catch(() => {}); } });
+  });
+  const STAGE = { w: 800, h: 450, wide: 2.3 }; // the game's own pixels (450 high, as wide as the screen's shape, 16:9 up to wide:1); scaled to the screen whole
+  const stage = layer.querySelector('.fl-stage'), cv = layer.querySelector('canvas'), g = cv.getContext('2d');
+  let W = STAGE.w; const H = STAGE.h;
+  let DPR = 1, zoom = 1;
+  function resize() {
+    if (layer.hidden) return;
+    const sw = window.visualViewport?.width || innerWidth, sh = window.visualViewport?.height || innerHeight;
+    W = Math.round(H * Math.max(STAGE.w / STAGE.h, Math.min(STAGE.wide, sw / sh))); // (a longer phone: more of the way ahead, no bars at the sides)
+    stage.style.width = W + 'px';
+    zoom = Math.min(sw / W, sh / H);
+    stage.style.transform = `translate(-50%, -50%) scale(${zoom})`;
+    DPR = Math.min(3, (window.devicePixelRatio || 1) * zoom); // (drawn at the screen's own sharpness)
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  // (a phone settles its size a moment after opening, turning round or going fullscreen: measured again then)
+  const resizeSoon = () => { resize(); for (const ms of [100, 300, 700, 1500]) setTimeout(resize, ms); };
+  for (const ev of ['resize', 'orientationchange', 'pageshow']) addEventListener(ev, resizeSoon);
+  document.addEventListener('fullscreenchange', resizeSoon); window.visualViewport?.addEventListener('resize', resize);
+  const at = e => { const r = stage.getBoundingClientRect(); return { x: (e.clientX - r.left) / zoom, y: (e.clientY - r.top) / zoom }; }; // (a touch, in stage pixels)
+
+  // the fox's clips: run (facing right: on the ground, and its most stretched frame in the air), pounce (crouched
+  // on the branch; stretched out diving), roll (tumbling off a friend), joy (flung high), ouch, cheer / happy (at the end)
+  const CLIPS = { run: 'walk_r_loop_run', pounce: 'walk_r_to_pounce_r', roll: 'roll_loop', joy: 'jump_joy_loop',
+    ouch: 'surprised_loop', cheer: 'cheer_loop', happy: 'happy_loop', up: 'back_crouch_to_back_air', down: 'back_air_to_back_crouch',
+    brake: 'back_crouch_to_sit_back', look: 'sit_back_loop_look', sitUp: 'sit_back_to_back_air' }; // (the cloud road's end)
+  // (on Halloween, in its cape: the same clips made again with it — tools/wan_cape.py, assets/fox/clips_halloween —
+  // frame for frame as the plain ones, where they're there)
+  const PLAIN = {}, CAPED_CLIPS = {}, CAPED_ONES = ['cheer', 'happy', 'up', 'down', 'brake', 'look', 'sitUp'], CUT = ['run', 'pounce'];
+  // every picture of the game's, counted as it comes in (Fling.preload: the loading screen's bar)
+  const LOADING = { n: 0, done: 0 };
+  function pic() {
+    const im = new Image(); LOADING.n++;
+    const fin = () => { LOADING.done++; im.removeEventListener('load', fin); im.removeEventListener('error', fin); };
+    im.addEventListener('load', fin); im.addEventListener('error', fin); return im;
+  }
+  function tailless(src, cutSrc, key, i) { // a frame: its tail-less version where there is one (im.cut), else as it is
+    const im = pic(); im.root = [key, i]; im.cut = !!cutSrc;
+    if (cutSrc) im.onerror = () => { im.onerror = null; im.cut = false; im.src = src; };
+    im.src = cutSrc || src; return im;
+  }
+  function loadClips() { // (its clips' frames: fetched once it's to be played — see warm())
+    const jobs = [];
+    for (const [k, clip] of Object.entries(CLIPS)) for (const [into, dir] of [[PLAIN, 'clips'], ...(CAPED_ONES.includes(k) ? [[CAPED_CLIPS, 'clips_halloween']] : [])]) jobs.push((async () => {
+      // from the front or behind: the clip made again without its tail (tools/wan_notail.py), where it's there
+      const own = MULTI && await fetch(`assets/fox/${dir}_notail/${clip}/meta.json`).catch(() => null);
+      if (own?.ok) {
+        const m = await own.json(), d = `${dir}_notail/${clip}`;
+        into[k] = m.frames.map((f, i) => Object.assign(tailless(`assets/fox/${d}/${f}?v=${m.rev || 1}`, null, d, i), { cut: true }));
+        return;
+      }
+      const r = await fetch(`assets/fox/${dir}/${clip}/meta.json`).catch(() => null);
+      if (!r?.ok) return;
+      const m = await r.json();
+      const cut = MULTI && CUT.includes(k) && dir === 'clips'; // (side on: its tail taken off, tools/tail_cut.py — the game draws them all)
+      into[k] = m.frames.map((f, i) => tailless(`assets/fox/${dir}/${clip}/${f}?v=${m.rev || 1}`, cut && `assets/fox/notail/${dir}/${clip}/${f}?v=${m.rev || 1}`, `${dir}/${clip}`, i)); // (root: where its tail grows, in tail_roots.json)
+    })());
+    return Promise.all(jobs);
+  }
+  const A = new Proxy(PLAIN, { get: (o, k) => (LOOK.night && CAPED_CLIPS[k]) || o[k] });
+  const AIR = +params.get('air') || 10, DIVE = 7, CROUCH = [0, 4]; // (frames: run's stretched, pounce's dive, pounce's crouch)
+  const frameOf = (k, t, fps = 16) => A[k]?.length ? A[k][Math.floor(t * fps) % A[k].length] : null;
+
+  // sounds: little synth blips (no files)
+  let ac = null;
+  function blip(f0, f1, dur, type = 'sine', vol = 0.15) {
+    if (!ac) return;
+    const o = ac.createOscillator(), v = ac.createGain(), t = ac.currentTime;
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    v.gain.setValueAtTime(vol, t); v.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(v).connect(window.Sound ? Sound.sfx : ac.destination); o.start(t); o.stop(t + dur);
+  }
+  // the super bounce's: as a fighting game's big move sounds — a metal flash as the close-up comes in, power
+  // gathering under it, and the burst: a heavy hit, distorted, ringing out in a hall (all made here, no sound files)
+  let noiseBuf = null, hall = null;
+  function noise() { if (!noiseBuf) { noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate); const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; } const n = ac.createBufferSource(); n.buffer = noiseBuf; return n; }
+  function out() { // (through a hall: a reverb made of fading noise)
+    const dest = window.Sound ? Sound.sfx : ac.destination;
+    if (!hall) {
+      const len = ac.sampleRate * 2.2, ir = ac.createBuffer(2, len, ac.sampleRate);
+      for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 3; }
+      const cv = ac.createConvolver(), wet = ac.createGain(); cv.buffer = ir; wet.gain.value = 0.45;
+      hall = ac.createGain(); hall.connect(dest); hall.connect(cv).connect(wet).connect(dest);
+    }
+    return hall;
+  }
+  const env = (g, t, peak, a, d) => { g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(peak, t + a); g.gain.exponentialRampToValueAtTime(0.0001, t + a + d); };
+  function flash() { // "shing!": a bright noise burst and metal partials, a boom under it
+    if (!ac) return; const t = ac.currentTime, o = out();
+    const n = noise(), bp = ac.createBiquadFilter(), g = ac.createGain(); bp.type = 'highpass'; bp.frequency.value = 3000;
+    env(g, t, 0.5, 0.003, 0.18); n.connect(bp).connect(g).connect(o); n.start(t); n.stop(t + 0.2);
+    for (const [fr, v] of [[1870, 0.18], [2830, 0.14], [4150, 0.1], [5620, 0.07]]) {
+      const s = ac.createOscillator(), sg = ac.createGain(); s.frequency.value = fr; env(sg, t, v, 0.002, 0.7); s.connect(sg).connect(o); s.start(t); s.stop(t + 0.75);
+    }
+    const b = ac.createOscillator(), bg = ac.createGain(); b.frequency.setValueAtTime(140, t); b.frequency.exponentialRampToValueAtTime(40, t + 0.3);
+    env(bg, t, 0.7, 0.003, 0.35); b.connect(bg).connect(o); b.start(t); b.stop(t + 0.4);
+  }
+  function charge(dur) { // the power gathering: a rising roar and a chord climbing, louder to the end
+    if (!ac) return; const t = ac.currentTime + 0.12, o = out(), end = ac.currentTime + dur - 0.03;
+    const n = noise(); n.loop = true; const bp = ac.createBiquadFilter(), g = ac.createGain();
+    bp.type = 'bandpass'; bp.Q.value = 4; bp.frequency.setValueAtTime(300, t); bp.frequency.exponentialRampToValueAtTime(3500, end);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.35, end); g.gain.exponentialRampToValueAtTime(0.0001, end + 0.08);
+    n.connect(bp).connect(g).connect(o); n.start(t); n.stop(end + 0.1);
+    const lp = ac.createBiquadFilter(), cg = ac.createGain(), wob = ac.createOscillator(), wg = ac.createGain();
+    lp.type = 'lowpass'; lp.frequency.setValueAtTime(400, t); lp.frequency.exponentialRampToValueAtTime(5000, end);
+    cg.gain.setValueAtTime(0.0001, t); cg.gain.exponentialRampToValueAtTime(0.12, end); cg.gain.exponentialRampToValueAtTime(0.0001, end + 0.08);
+    wob.frequency.setValueAtTime(12, t); wob.frequency.linearRampToValueAtTime(44, end); wg.gain.value = 0.05; wob.connect(wg).connect(cg.gain); wob.start(t); wob.stop(end + 0.1);
+    lp.connect(cg).connect(o);
+    for (const m of [1, 1.5, 2, 2.52]) { const s = ac.createOscillator(); s.type = 'sawtooth'; s.frequency.setValueAtTime(110 * m, t); s.frequency.exponentialRampToValueAtTime(330 * m, end); s.connect(lp); s.start(t); s.stop(end + 0.1); }
+  }
+  function boom() { // the burst: a heavy kick falling away, a distorted blast, a bright chord, all ringing in the hall
+    if (!ac) return; const t = ac.currentTime, o = out();
+    const k = ac.createOscillator(), kg = ac.createGain(); k.frequency.setValueAtTime(180, t); k.frequency.exponentialRampToValueAtTime(32, t + 0.9);
+    env(kg, t, 0.9, 0.004, 1.1); k.connect(kg).connect(o); k.start(t); k.stop(t + 1.2);
+    const n = noise(), lp = ac.createBiquadFilter(), sh = ac.createWaveShaper(), g = ac.createGain();
+    const curve = new Float32Array(1024); for (let i = 0; i < 1024; i++) { const x = i / 512 - 1; curve[i] = Math.tanh(x * 6); } sh.curve = curve;
+    lp.type = 'lowpass'; lp.frequency.setValueAtTime(8000, t); lp.frequency.exponentialRampToValueAtTime(200, t + 1.2);
+    env(g, t, 0.45, 0.003, 1.3); n.connect(sh).connect(lp).connect(g).connect(o); n.start(t); n.stop(t + 1.4);
+    for (const fr of [523, 659, 784, 1047]) { const s = ac.createOscillator(), sg = ac.createGain(); s.type = 'square'; s.frequency.value = fr; env(sg, t + 0.02, 0.035, 0.01, 0.9); s.connect(sg).connect(o); s.start(t); s.stop(t + 1.1); }
+  }
+  function wobble(f0, f1, dur, rate, depth, type, vol) { // a tone sliding f0 → f1 that shakes as it goes, the shake dying away (a spring, a belly)
+    if (!ac) return; const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain(), lfo = ac.createOscillator(), lg = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur * 0.35);
+    lfo.frequency.value = rate; lg.gain.setValueAtTime(depth, t); lg.gain.exponentialRampToValueAtTime(depth * 0.05, t + dur); lfo.connect(lg).connect(o.frequency);
+    env(g, t, vol, 0.006, dur); o.connect(g).connect(window.Sound ? Sound.sfx : ac.destination);
+    o.start(t); lfo.start(t); o.stop(t + dur + 0.05); lfo.stop(t + dur + 0.05);
+  }
+  function thump(freq, dur, vol) { // a soft, muffled hit (noise through a low filter)
+    if (!ac) return; const t = ac.currentTime, n = noise(), lp = ac.createBiquadFilter(), g = ac.createGain();
+    lp.type = 'lowpass'; lp.frequency.value = freq; env(g, t, vol, 0.004, dur); n.connect(lp).connect(g).connect(window.Sound ? Sound.sfx : ac.destination); n.start(t); n.stop(t + dur + 0.05);
+  }
+  const chime = (f, n, gap) => { for (let i = 0; i < n; i++) setTimeout(() => blip(f * (1 + i * 0.25), f * 1.5 * (1 + i * 0.25), 0.2), i * gap); };
+  const SFX = {
+    boing: () => blip(220, 660, 0.25), hop: () => blip(400, 800, 0.12), big: () => blip(120, 520, 0.45, 'triangle', 0.25),
+    whoosh: () => blip(900, 300, 0.4, 'triangle'), fling: () => { blip(150, 700, 0.35, 'triangle', 0.22); blip(1200, 400, 0.4, 'triangle', 0.08); }, ouch: () => blip(500, 150, 0.3, 'square', 0.08),
+    star: () => blip(1200 + Math.random() * 600, 2400, 0.08, 'sine', 0.08), dash: () => blip(300, 1200, 0.3, 'sawtooth', 0.08), dive: () => blip(1000, 250, 0.2, 'triangle', 0.1),
+    thud: () => blip(160, 60, 0.15, 'sine', 0.2), soar: () => { blip(500, 900, 0.5, 'triangle', 0.12); chime(990, 2, 90); }, best: () => chime(660, 3, 120), ready: () => chime(880, 4, 80),
+    super: () => { blip(100, 900, 0.7, 'sawtooth', 0.12); chime(660, 5, 90); },
+    belly: () => { thump(260, 0.25, 0.5); wobble(85, 210, 0.7, 11, 28, 'sine', 0.5); wobble(170, 420, 0.5, 11, 40, 'triangle', 0.12); }, // (a big soft belly: pomf, boyoyoing)
+    spring: () => { blip(900, 1500, 0.05, 'sine', 0.15); wobble(260, 820, 0.85, 17, 120, 'triangle', 0.3); wobble(520, 1640, 0.6, 17, 220, 'sine', 0.08); }, // (the cap: pop, boinnng)
+    brake: () => { thump(1800, 0.6, 0.18); blip(700, 260, 0.5, 'sawtooth', 0.04); }, // (a skid on cloud: a soft hiss sliding down)
+    card: tier => { // a card taken: a quick bright run up, longer and higher the rarer (gold: sparkling on after)
+      const run = { blue: [523, 659, 784, 1047], purple: [523, 659, 784, 1047, 1319], gold: [523, 659, 784, 1047, 1319, 1568, 2093] }[tier] || [523, 659, 784, 1047];
+      run.forEach((f, i) => setTimeout(() => { blip(f, f * 1.02, 0.28, 'triangle', 0.13); blip(f * 2, f * 2, 0.14, 'sine', 0.04); }, i * 55));
+      if (tier !== 'blue') setTimeout(() => chime(tier === 'gold' ? 1568 : 1319, tier === 'gold' ? 5 : 3, 55), run.length * 55 + 40);
+    },
+    perfect: () => { // tapped right on the burst: a clear bell, ringing on, and a glitter going up
+      if (!ac) return; const t = ac.currentTime, o = out();
+      for (const [fr, v, d] of [[1568, 0.22, 1.6], [3136, 0.1, 1.2], [4699, 0.05, 0.8], [2349, 0.07, 1.4]]) {
+        const s = ac.createOscillator(), sg = ac.createGain(); s.type = 'sine'; s.frequency.value = fr; env(sg, t, v, 0.002, d); s.connect(sg).connect(o); s.start(t); s.stop(t + d + 0.05);
+      }
+      [2093, 2637, 3136, 4186].forEach((fr, i) => setTimeout(() => blip(fr, fr * 1.01, 0.18, 'sine', 0.07), 90 + i * 45));
+    },
+    cutin: dur => { flash(); charge(dur); }, boom: () => { boom(); chime(660, 5, 90); },
+  };
+
+  let S = null; // the run
+  const fresh = () => ({
+    phase: 'aim', t: 0, power: 0, pull: { x: 0, y: 0 }, drag: null, spring: null,
+    fox: { x: PULL.rest[0], y: PULL.rest[1], vx: 0, vy: 0, spin: 0, glide: 0, ride: 0, hops: 0, still: 0, dash: 0, dive: false, act: null, rainbow: 0, soar: false },
+    dashes: DASHES, combo: 0, frog: false, friends: [], stars: [], nextFriend: 8, nextStar: 4, got: 0, meter: 0, ready: params.has('ready'), // (?ready: a super bounce waiting from the start, to try it)
+    fx: [], glints: [], cam: { x: 0, s: 1, scroll: 0 }, shake: 0, fade: null, sky: null, passedBest: !best,
+    mods: mods(), deck: [], picking: false,
+  });
+  const need = () => Math.max(4, SUPER.stars - S.mods.superLess); // (stars for a super bounce, fewer with cards)
+
+  function spawn() { // keep the way ahead filled, a screen and more past the fox
+    const ahead = S.fox.x + 60;
+    while (S.nextFriend < ahead) {
+      let kind = pickKind(); // (never the same friend twice in a row — unless ?friend= asks for one kind)
+      for (let n = 0; !ONLY && kind === S.friends.at(-1)?.kind && n < 20; n++) kind = pickKind();
+      S.friends.push({ x: S.nextFriend, x0: S.nextFriend, y: 0, kind, used: false, t: 0, carry: false, bunny: false });
+      S.nextFriend += 6 + Math.random() * 12 + Math.min(10, S.nextFriend / 80); // (thinning out farther on)
+    }
+    while (S.nextStar < ahead) { // few down low, thick up high
+      for (let y = STARS.low; y < STARS.top; y += STARS.band) {
+        if (Math.random() < 0.04 + 0.16 * (y / STARS.top) ** 1.2)
+          S.stars.push({ x: S.nextStar + Math.random() * STARS.step, y: Math.min(STARS.top, y + Math.random() * STARS.band), got: false });
+      }
+      S.nextStar += STARS.step;
+    }
+    S.friends = S.friends.filter(a => a.x > S.fox.x - 30);
+    S.stars = S.stars.filter(a => a.x > S.fox.x - 30);
+  }
+
+  function pop(text, x, y, color = '#fff', size = 0.8) { S.fx.push({ kind: 'text', text, x, y, t: 0, color, size }); }
+  function dust(x, y, n = 6) { for (let k = 0; k < n; k++) S.fx.push({ kind: 'dust', x, y, vx: (Math.random() - 0.3) * 4, vy: Math.random() * 3, t: 0 }); }
+  function confetti(x, y, n = 40) {
+    const cs = ['#ff8a65', '#ffd34d', '#7cc7ff', '#9be27a', '#e58cff'];
+    for (let k = 0; k < n; k++) S.fx.push({ kind: 'bit', x, y, vx: (Math.random() - 0.5) * 12, vy: Math.random() * 10, t: 0, c: cs[k % cs.length] });
+  }
+  function starBurst(x, y, n = 30, speed = 9) { // stars in every colour of the rainbow, bursting out all round
+    for (let k = 0; k < n; k++) { const a = k / n * Math.PI * 2 + Math.random() * 0.3, v = speed * (0.55 + Math.random() * 0.6);
+      S.fx.push({ kind: 'star', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0, c: `hsl(${(k / n) * 360}, 95%, 62%)`, r: 0.25 + Math.random() * 0.25, spin: Math.random() * 6 }); }
+    S.fx.push({ kind: 'ring', x, y, t: 0 });
+  }
+  const act = (name, dur) => { S.fox.act = { name, t: 0, dur }; }; // a pose played for a while (over the flying one)
+
+  function aimed() { // the pull → its velocity: the other way, as fast as it's pulled far
+    const len = Math.min(PULL.max, Math.hypot(S.pull.x, S.pull.y)), d = PULL.deg;
+    const a = Math.max(d[0], Math.min(d[1], Math.atan2(-S.pull.y, -S.pull.x) * 180 / Math.PI)) * Math.PI / 180;
+    const v = LAUNCH.min + (LAUNCH.max - LAUNCH.min) * len / PULL.max;
+    return { vx: v * Math.cos(a), vy: v * Math.sin(a), power: len / PULL.max };
+  }
+  function pullTo(e) { // dragged from anywhere: the pull is how far the finger has gone from where it went down
+    const s = S.cam.s, p = at(e), dx = (p.x - S.drag.x) / s, dy = -(p.y - S.drag.y) / s, len = Math.hypot(dx, dy);
+    const k = len > PULL.max ? PULL.max / len : 1;
+    S.pull = { x: dx * k, y: Math.max(-PULL.rest[1] + 0.2, dy * k) };
+  }
+  function letGo() {
+    ac = window.Sound ? Sound.ctx() : ac || (() => { try { return new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; } })(); // (sound.js: one context, the effects on its bus)
+    const v = aimed(), up = 1 + S.mods.launch; v.vx *= up; v.vy *= up; // (cards: the branch flings harder)
+    S.spring = { x: S.pull.x, y: S.pull.y, t: 0 };
+    S.pull = { x: 0, y: 0 };
+    if (v.power * PULL.max < PULL.least) return; // (hardly pulled: back on the tree)
+    Object.assign(S.fox, { vx: v.vx, vy: v.vy, soar: params.has('soar') }); // (?soar: gliding from the start, to try it)
+    S.phase = 'fly';
+    SFX.big(); dust(S.fox.x, S.fox.y, 6);
+    if (params.has('sky')) S.fade = { t: 0, mid: toSky }; // (?sky: straight up onto the clouds, to try them)
+    if (v.power > 0.9) pop('超強！', S.fox.x + 1, S.fox.y + 2, '#ffe14d');
+  }
+
+  function tap() {
+    if (S?.cutin) { const c = S.cutin; if (c.hit === undefined) { c.hit = c.t >= CUTIN.dur - TIMING.early; c.at = c.t; } return; } // (the cut-in on: a tap judged, nothing else)
+    if (S?.late && S.t < S.late.until) { S.late = null; superBoost(); return; } // (just after the burst: still in time — not a dash)
+    if (!S) return;
+    ac = window.Sound ? Sound.ctx() : ac || (() => { try { return new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; } })(); // (sound.js: one context, the effects on its bus)
+    if (S.phase !== 'fly') return;
+    const f = S.fox;
+    if (f.hold > 0) return; // (in the giraffe's mouth)
+    if (f.vy < 0 && f.y > 0.01) { // falling: a dive down at a slant — free, as often as it likes
+      if (!f.dive) f.vx += DASH.down[0];
+      f.vy = Math.min(f.vy, DASH.down[1]); f.dive = true; f.soar = false; // (a dive ends a glide)
+      f.glide = f.ride = 0; f.hops = 0; f.act = null; f.spin = 0;
+      SFX.dive(); return;
+    }
+    if (S.dashes <= 0) { if (!S.mods.refill) return; S.mods.refill--; S.dashes++; pop('噴射回復！', f.x, f.y + 2.2, '#ffb347', 0.6); } // (a card: one more)
+    S.dashes--;
+    starBurst(f.x, f.y + 0.6, 22); // (off it goes in a burst of rainbow stars)
+    f.vx += DASH.up[0]; f.vy = Math.max(f.vy, 0) + DASH.up[1]; f.dive = false;
+    f.glide = f.ride = 0; f.hops = 0; f.still = 0; f.dash = 0.5; f.act = null; f.spin = 0;
+    SFX.dash(); hud();
+  }
+
+  function comboUp(a, fr) { // onto a friend from a friend, the ground not touched between: COMBO m/s more, on the way it's thrown
+    const f = S.fox, v = Math.hypot(f.vx, f.vy) || 1;
+    const c = COMBO + S.mods.combo; f.vx += f.vx / v * c; f.vy += f.vy / v * c; S.shake = Math.max(S.shake, 0.2);
+    pop(`COMBO ×${S.combo}!`, a.x - 0.5, fr.h + 3.2, '#7cf0ff', 0.75); chime(780, 2, 70);
+  }
+  function landOn(a) { // onto a friend: its own throw, or a super bounce when the stars are full
+    S.fox.up = null; // (bouncing off the ground afresh after it)
+    const f = S.fox, fr = FRIENDS[a.kind];
+    const dived = f.dive; // (diving onto it: a hedgehog knocked away, any other friend's throw the stronger)
+    const combo = S.combo > 0; S.combo++; // (from a friend, not the ground)
+    a.used = true; a.t = 0; f.y = box(a).h; f.hops = 0; f.glide = 0; f.ride = 0; f.dive = false; f.dash = 0; f.soar = false;
+    dust(a.x, 0.2, 5);
+    const power = (S.ready && a.kind !== 'mushroom') || a.bunny; // a super bounce (the stars full; not off the mushroom / the witch's pot: its own bounce, the stars kept for the next), or a bunny bounce (a rabbit ran here first): as strong
+    if (power) { // (the bunny's first: the stars keep for the next)
+      const bunny = a.bunny;
+      if (bunny) a.bunny = false; else { S.ready = false; S.meter = 0; }
+      const burst = () => {
+        f.rainbow = 2.2; S.shake = 0.5; if (bunny) SFX.super(); else SFX.boom();
+        pop(bunny ? 'BUNNY BOUNCE!' : 'SUPER BOUNCE!', a.x, fr.h + 2.5, bunny ? '#ffb3d9' : '#ffe14d', 1.3); confetti(a.x, fr.h + 1, 60); starBurst(a.x, fr.h + 0.5, 40, 13);
+      };
+      if (!bunny && cutinOf(a.kind)) { S.cutin = { kind: a.kind, t: 0, then: burst }; SFX.cutin(CUTIN.dur); } else burst(); // (a super bounce: the friend's close-up first, all held meanwhile)
+    }
+    if ((dived || power || S.mods.noTrip) && a.kind === 'hedgehog') { // (or a card: never tripped on it) // curled up and rolling off along the ground, knocking flying whoever it meets
+      a.roll = true; a.speed = Math.max(ROLL.least, f.vx * 0.9); a.spin = 0;
+      FRIENDS.mushroom.hit(f); f.vx *= DIVE_BOOST + S.mods.dive; f.vy *= DIVE_BOOST + S.mods.dive; // (off it as off a mushroom dived onto)
+      if (power) { f.vx *= SUPER.boost; f.vy *= SUPER.boost; }
+      SFX.big(); act('joy', 0.8); S.shake = Math.max(S.shake, 0.2);
+      if (!power) pop('滾出去！', a.x, fr.h + 1.5, '#ffe14d');
+      if (combo) comboUp(a, fr);
+      return;
+    }
+    const s = fr.hit(f); SFX[s]?.();
+    const M = S.mods, pw = 1 + (M.power[a.kind] || 0); // (cards: stronger, gliding off it, bouncing on after it)
+    if (pw > 1) { f.vx *= pw; f.vy *= pw; f.glide *= pw; f.ride *= pw; }
+    if (M.glide[a.kind]) f.soar = true;
+    if (M.hops[a.kind]) f.hops += M.hops[a.kind];
+    if (power) { f.vx *= SUPER.boost; f.vy *= SUPER.boost; f.glide *= SUPER.boost; f.ride *= SUPER.boost; if (f.hops) f.hops += SUPER.hops; }
+    if (dived && s !== 'ouch') { f.vx *= DIVE_BOOST + M.dive; f.vy *= DIVE_BOOST + M.dive; pop('強力！', a.x + 1, fr.h + 2.4, '#ffb347', 0.6); }
+    if (combo && s !== 'ouch') comboUp(a, fr);
+    if (s === 'ouch') S.combo = 0; // (tripped: no combo on from it)
+    if (a.kind === 'rabbit') { // off ahead past two friends: the first knocked flying on the way, by the second it stops — a bunny bounce off that one
+      const [k, b] = S.friends.filter(o => !o.used && !o.bunny && o.x > a.x + 2);
+      if (b) { b.bunny = true; a.runTo = b; a.knock = M.noKnock ? null : k; a.speed = Math.max(RABBIT.run, f.vx + 6); }
+    }
+    if (a.kind === 'frog') { S.frog = true; pop('俯衝落地彈更高！', a.x + 1, fr.h + 2.6, '#9be27a', 0.55); }
+    if (s === 'soar') { pop('滑翔～', a.x, fr.h + 1.5, '#ffd27a'); return; } // (the squirrel's: off gliding)
+    a.carry = a.kind === 'owl' || a.kind === 'boar';
+    if (f.hold > 0) S.holder = a; // (the giraffe's: held in its mouth through the swing)
+    if (power) { act('joy', 1.2); return; } // (its words said already)
+    if (s === 'ouch') { f.spin = 1; act('roll', 0.6); } // (tripped: tumbling over it)
+    else if (s === 'big' || s === 'belly' || s === 'spring') act('joy', 0.8);
+    else if (s === 'fling') { f.spin = 1.5; act('roll', 0.75); }
+    else if (!a.carry) { f.spin = 1; act('roll', 0.5); }
+    pop({ boing: '彈！', hop: '呱呱！', big: '飛高高！', belly: '噗～飛高高！', spring: '咚～彈超高！', whoosh: '咻～', fling: '甩～！', ouch: '絆倒！' }[s], a.x, fr.h + 1.5, s === 'ouch' ? '#ff8a8a' : '#fff');
+  }
+
+  function step(dt) {
+    if (S.fade) { // going through black: the change made at its darkest, all going on meanwhile
+      const fd = S.fade; fd.t += dt;
+      if (!fd.done && fd.t >= FADE / 2) { fd.done = true; fd.mid(); }
+      if (fd.t >= FADE) S.fade = null;
+    }
+    S.t += dt;
+    S.shake = Math.max(0, S.shake - dt);
+    const f = S.fox;
+    if (f.act && (f.act.t += dt) > f.act.dur) f.act = null;
+    if (S.spring) S.spring.t += dt;
+    if (S.phase === 'aim') { // on the tree's top, pulled back as far as it's dragged
+      S.power = Math.hypot(S.pull.x, S.pull.y) / PULL.max;
+      f.x = PULL.rest[0] + S.pull.x; f.y = Math.max(0.2, PULL.rest[1] + S.pull.y);
+      return;
+    }
+    if (S.phase === 'sky') return stepSky(dt);
+    if (S.phase !== 'fly') { friends(dt); return; }
+    // moving
+    f.dash = Math.max(0, f.dash - dt); f.rainbow = Math.max(0, f.rainbow - dt);
+    if (f.hold > 0) { f.hold -= dt; const h = headAt(S.holder); f.x = h.x; f.y = h.y - 0.5; } // (swung on the giraffe's neck, then let go)
+    else if (f.ride > 0) { f.ride -= dt; f.y = FRIENDS.boar.h * 0.8; f.vy = 0; } // (on a boar's back)
+    else {
+      const grav = f.glide > 0 ? 0 : G; // (in the owl's claws: on at its angle)
+      if (f.glide > 0) f.glide -= dt;
+      f.vy -= grav * dt;
+      if (f.soar && f.vy < 0) f.vy = Math.max(f.vy, -SOAR.fall); // (gliding, off a squirrel: drifting down slowly, on at its speed)
+    }
+    if (!(f.hold > 0)) { f.x += f.vx * dt; f.y += f.vy * dt; }
+    f.spin = Math.max(0, f.spin - dt * 2);
+    if (f.dash > 0) S.fx.push({ kind: 'fire', x: f.x - 0.3, y: f.y + 0.8, vx: -f.vx * 0.2, vy: 0.5, t: 0 });
+    if (f.rainbow > 0) S.fx.push({ kind: 'rain', x: f.x - 0.2, y: f.y + 0.8, t: 0, c: `hsl(${(S.t * 600) % 360}, 90%, 65%)` });
+    // onto a friend (coming down)
+    if (f.vy < 0) for (const a of S.friends) {
+      if (!a.used && Math.abs(f.x - a.x - box(a).cx) < (FRIENDS[a.kind].r || 0.9) && f.y < box(a).h && f.y > -0.3) { landOn(a); break; }
+    }
+    // the plain ground
+    if (f.y <= 0) {
+      const dived = f.dive;
+      f.y = 0; f.dive = false; S.combo = 0; f.soar = false; // (down: the glide over)
+      if (f.vy < 0) {
+        if (dived && S.frog && -f.vy > 3) { // a dive onto the ground after a frog: sprung back up high (the frog's spring used)
+          f.vy = Math.max(-f.vy * FROG.keep, FROG.up); f.vx *= 0.95; S.frog = false;
+          SFX.hop(); dust(f.x, 0, 8); act('roll', 0.4); f.spin = 1; pop('呱彈！', f.x, 1.8, '#9be27a', 0.6);
+        }
+        else if (f.hops > 0) { f.hops--; f.vy = 7; f.vx *= 0.97; SFX.hop(); dust(f.x, 0); }
+        else if (-f.vy > 3) { f.vy = f.up = Math.min(-f.vy * ((dived ? GROUND.dive : GROUND.keep) + S.mods.ground), (f.up ?? Infinity) * Math.min(0.9, GROUND.fade + S.mods.ground)); f.vx *= GROUND.drag; SFX.thud(); dust(f.x, 0, 8); if (-f.vy > 6) act('roll', 0.4); }
+        else f.vy = 0;
+      }
+      if (f.vy === 0) { // rolling to a stop
+        f.vx = Math.max(0, f.vx - GROUND.roll * dt);
+        if (f.vx === 0 && (f.still += dt) > (S.dashes > 0 ? 1.2 : 0.6)) {
+          if (!S.mods.again) return end(); // (a beat to dash again, if one is left)
+          S.mods.again--; f.still = 0; f.vx = 14; f.vy = 12; f.up = null; // (a card: one more leap on)
+          SFX.dash(); act('joy', 0.8); pop('再跳一次！', f.x, 2.2, '#ffe14d', 0.8);
+        }
+      }
+    }
+    // stars (and the super bounce they fill)
+    for (const a of S.stars) if (!a.got && Math.hypot(a.x - f.x, a.y - (f.y + 0.7)) < 1.1 * (1 + S.mods.magnet)) {
+      a.got = true; pop('+1', a.x, a.y + 0.6, '#ffe14d', 0.5); starGot();
+    }
+    if (f.y > SKY.height && !(f.hold > 0) && !S.fade) S.fade = { t: 0, mid: toSky }; // high enough: up onto the clouds
+    // past the farthest
+    if (!S.passedBest && f.x > best) { S.passedBest = true; SFX.best(); pop('新紀錄！', f.x, f.y + 3, '#ffe14d'); confetti(f.x, f.y + 2); }
+    friends(dt);
+    spawn(); hud();
+  }
+  function starGot() { // a star caught (in the air or on the clouds): counted, and toward the super bounce
+    S.got++; SFX.star();
+    for (let k = 0; k < 6; k++) S.glints.push({ x: (Math.random() - 0.5) * 1.3, y: (Math.random() - 0.5) * 1.1, t: -k * 0.05, r: 0.08 + Math.random() * 0.07, spin: Math.random() * 3 }); // (it sparkles)
+    if (!S.ready && ++S.meter >= need()) {
+      S.ready = true; SFX.ready();
+      pop('SUPER BOUNCE 準備好！', S.fox.x + 2, S.fox.y + 3, '#ffe14d', 0.9);
+    }
+  }
+
+  // up on the clouds: a road of cloud on ahead, the fox running along it away from us, three lanes and stars in
+  // rows on them (a tap on the left or the right half: a lane that way); SKY.run m of it, then down off its end
+  function toSky() {
+    const f = S.fox, sky = { z: 0, x0: f.x, lane: 0, x: 0, stars: [], t: 0, leap: -1, fall: -1, intro: 0, pop: 0, got: 0 };
+    let lane = 0; // rows of stars, each in a lane (a lane or two over from the last: to steer for)
+    for (let z = SKYSTARS.first; z < SKY.run - ROADEND.brake - 15; z += SKYSTARS.gap) {
+      const others = [-1, 0, 1].filter(l => l !== lane); lane = others[Math.floor(Math.random() * 2)];
+      for (let k = 0; k < SKYSTARS.run; k++) sky.stars.push({ lane, z: z + k * SKYSTARS.step, got: false });
+    }
+    sky.need = Math.ceil(sky.stars.length * SKYSTARS.full);
+    Object.assign(f, { vx: 0, vy: 0, hold: 0, glide: 0, ride: 0, hops: 0, dive: false, act: null, spin: 0, dash: 0, soar: false });
+    S.sky = sky; S.phase = 'sky'; S.combo = 0;
+    SFX.super(); hud();
+  }
+  function roadAt() { return [-1.5, 1.5]; } // the road: wide, three lanes all the way (nowhere to fall off)
+
+  function steer(d) { if (S?.phase === 'sky' && !S.sky.end) S.sky.lane = Math.max(-2, Math.min(2, S.sky.lane + d)); } // (not once it's braking; past an outer lane: off the road's edge)
+  function pickCard(i) { // a card tapped at the road's end: off it leaps, to it
+    const e = S.sky?.end; if (!e || e.stage !== 'look' || i < 0 || i > 2) return;
+    e.stage = 'leap'; e.pick = i; e.to = i - 1; S.sky.leap = 0; SFX.card(S.sky.hand[i].tier); SFX.whoosh();
+  }
+  function cardAt(p) { return (S?.sky?.cardRects || []).findIndex(r => r && p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h); } // (the card under a touch)
+  function stepSky(dt) {
+    const sky = S.sky, f = S.fox;
+    sky.t += dt;
+    if (sky.leap >= 0) { // off the end: a leap out over the sea of cloud (towards the card tapped), and down through black
+      sky.leap += dt;
+      if (sky.end) sky.x += (sky.end.to * 1.6 - sky.x) * Math.min(1, dt * 4); // (off that way: towards the card chosen, out over the side)
+      if (sky.end && sky.took === undefined && sky.leap > 0.3) { const c = sky.hand[sky.end.pick]; sky.took = sky.end.pick; c.apply(S.mods, S); S.deck.push(c); deckUI(); } // (into it: taken)
+      if (!S.fade && sky.leap > 0.6) S.fade = { t: 0, mid: fromSky };
+      return hud();
+    }
+    if (sky.fall >= 0) { // into a hole: down through the cloud, and through black back to the forest, from where it fell
+      sky.fall += dt;
+      sky.x += Math.sign(sky.fellAt || 0) * dt * 1.2; // (on over that side as it goes)
+      if (!S.fade && sky.fall > FALL_IN + 0.35) S.fade = { t: 0, mid: () => fromSky(true) };
+      return hud();
+    }
+    if (S.picking) return hud(); // (at its end, the cards out: waiting for one)
+    if (!S.fade || S.fade.t > FADE * 0.75) sky.pop += dt; // (from when it's out of the black, mostly)
+    if (sky.intro < SKY.intro) { sky.intro = Math.min(SKY.intro, sky.pop); sky.x += (sky.lane - sky.x) * Math.min(1, dt * 12); return hud(); } // (out of the cloud first)
+    const brakeAt = SKY.run - ROADEND.brake;
+    if (sky.end) { // braking, then sat there looking at the cards (waiting for a tap on one)
+      const e = sky.end, T = 2 * ROADEND.brake / SKY.speed; e.t += dt;
+      sky.z = brakeAt + SKY.speed * Math.min(e.t, T) - SKY.speed / (2 * T) * Math.min(e.t, T) ** 2; // (evenly slower, to a stop at the end)
+      e.smoke ||= []; // (a trail of cloud kicked up by its back feet as it skids, left where it was thrown up)
+      if (e.t < T) for (let n = Math.ceil(dt * 60 * (1 - e.t / T)) + 1; n-- > 0;) e.smoke.push({ x: sky.x + (Math.random() < 0.5 ? -0.17 : 0.17) + (Math.random() - 0.5) * 0.08, z: sky.z - 0.3, t: 0, r: 0.08 + Math.random() * 0.06, up: Math.random() * 0.25 });
+      for (const p of e.smoke) p.t += dt; e.smoke = e.smoke.filter(p => p.t < 0.9);
+      if (e.t >= T && e.stage === 'brake') e.stage = 'look';
+      sky.x += (sky.lane - sky.x) * Math.min(1, dt * 12);
+      if (AUTO && !params.has('hold') && e.stage === 'look' && e.t > T + 1.5) pickCard(Math.floor(Math.random() * 3)); // (?auto: one of them, by itself; ?hold: not)
+      return hud();
+    }
+    sky.z = Math.min(brakeAt, sky.z + SKY.speed * dt);
+    if (sky.z >= brakeAt) { sky.end = { t: 0, stage: 'brake', to: sky.lane, pick: -1 }; sky.hand = dealSky(Math.min(1, sky.got / sky.need)); SFX.brake(); }
+    if (AUTO) { const a = sky.stars.find(a => !a.got && a.z > sky.z - 1); if (a && a.z - sky.z < 20) sky.lane = a.lane; } // (?auto: off after the stars by itself, to try it)
+    sky.x += (sky.lane - sky.x) * Math.min(1, dt * 12);
+    f.x = sky.x0 + sky.z;
+    for (const a of sky.stars) if (!a.got && Math.abs(a.z - sky.z) < 1.5 && Math.abs(a.lane - sky.x) < 0.5) { a.got = true; sky.got++; starGot(); }
+    if (Math.abs(sky.x) > 1.5) { // steered off the road's edge: down through the cloud (a card: saved once, back on it)
+      if (S.mods.shield) { S.mods.shield--; sky.lane = sky.x = Math.sign(sky.x); SFX.boing(); S.shake = 0.3; pop('救回來了！', S.fox.x, 3, '#9be7ff', 0.6); }
+      else { sky.fall = 0; sky.fellAt = sky.x; SFX.whoosh(); return hud(); }
+    }
+    if (!S.passedBest && f.x > best) { S.passedBest = true; SFX.best(); }
+    hud();
+  }
+  function fromSky(fell) { // off the cloud's end: down from on high, a giraffe right under it, the way on fresh from here
+    const f = S.fox;                                     // (fallen off it: straight down from there, onto a friend)
+    f.x = S.sky.x0 + (fell ? S.sky.z : SKY.run); f.y = SKY.drop; f.vx = 0; f.vy = 0; f.up = null;
+    S.sky = null; S.phase = 'fly';
+    if (fell) { // (a friend right under it to catch it — one that throws it on, not a hedgehog or the sleeping bear)
+      S.friends = []; S.stars = []; S.nextFriend = f.x + 12; S.nextStar = f.x + 4;
+      const kinds = ['rabbit', 'frog', 'owl', 'giraffe', 'boar', 'squirrel'], a = { x: 0, x0: 0, y: 0, kind: kinds[Math.floor(Math.random() * kinds.length)], used: false, t: 0, carry: false, bunny: false };
+      a.x = a.x0 = f.x - box(a).cx; S.friends.push(a);
+      spawn(); act('ouch', 0.8); pop('掉下來了！', f.x, f.y + 2.5, '#fff', 0.9); return;
+    }
+    S.friends = []; S.stars = []; S.nextFriend = f.x + 14; S.nextStar = f.x + 4;
+    const gi = { x: 0, x0: 0, y: 0, kind: 'giraffe', used: false, t: 0, carry: false, bunny: false };
+    gi.x = gi.x0 = f.x - box(gi).cx; S.friends.push(gi); // (its head right under the fox)
+    spawn(); act('joy', 0.8);
+    pop('+500 m！', f.x, f.y + 2.5, '#ffe14d', 1.1);
+  }
+
+  // knocked flying (by the rabbit running by, or the hedgehog rolling into it): off up and back, tumbling, out of
+  // sight for good — not to be landed on, never back
+  const KICK = [-9, 16], ROLL = { least: 12, slow: 3, r: 0.4 }; // (m/s along, up; the roll: its least speed, slowing m/s², radius m)
+  function knock(b) {
+    b.used = b.kick = true; b.t = 0; b.there = null; b.runTo = null; b.carry = false;
+    SFX.boing(); dust(b.x, 0.2, 6); pop('撞飛！', b.x, FRIENDS[b.kind].h + 1.2, '#ffb3d9', 0.6);
+  }
+  function friends(dt) { // the friends after the fox lands on them: each its own way
+    const f = S.fox;
+    // (gone for good: the knocked ones, long gone; and once out of sight, a boar that has run on, a hedgehog stepped on or rolled off)
+    const out = a => { const sx = (a.x - S.cam.x) * S.cam.s + W * 0.3; return sx < -W * 0.15 || sx > W * 1.15; };
+    S.friends = S.friends.filter(a => !(a.kick && a.t > 3) && !(a.used && ((a.kind === 'boar' && !a.carry) || a.kind === 'hedgehog') && out(a)));
+    for (const a of S.friends) {
+      if (!a.used) continue;
+      a.t += dt;
+      if (a.kick) { a.x += KICK[0] * dt; a.y += KICK[1] * dt; }                                    // knocked flying, off up and back out of sight
+      else if (a.roll) { // the hedgehog rolling along, slowing; whoever's in its way knocked flying
+        a.speed = Math.max(0, a.speed - ROLL.slow * dt); a.x += a.speed * dt; a.spin += a.speed * dt / ROLL.r;
+        for (const b of S.friends) if (!b.used && b !== a && Math.abs(b.x - a.x) < 0.7) knock(b);
+        if (a.speed <= 0) { a.roll = false; a.t = 1; }
+      }
+      else if (a.runTo) { // running ahead in hops, to stand by the next friend (then a hop of its own there, waving)
+        const to = a.runTo.x - RABBIT.by;
+        a.x = Math.min(to, a.x + a.speed * dt); a.y = Math.abs(Math.sin(a.t * 9)) * 0.5;
+        const k = a.knock;
+        if (k && !k.used && a.x >= k.x - 0.6) { knock(k); a.knock = null; } // bumped into: knocked flying
+        if (a.x >= to) { a.there = a.runTo; a.runTo = null; a.t = 0; }
+      }
+      else if (a.there) a.y = a.there.bunny ? Math.abs(Math.sin(a.t * 5)) * 0.7 : 0; // (hopping by its friend while the bunny bounce waits there)
+      else if (a.kind === 'rabbit' || a.kind === 'squirrel') a.y = a.t < 0.5 ? Math.sin(a.t / 0.5 * Math.PI) * 0.8 : 0;          // a hop of its own
+      else if (a.kind === 'frog') { a.x += 4 * dt; a.y = Math.abs(Math.sin(a.t * 5)) * 0.8; }       // off hopping
+      else if (a.kind === 'owl') {
+        if (a.carry && f.glide > 0) { a.x = f.x; a.y = f.y + FOX_H * 0.9; }                         // the fox in its claws
+        else { a.carry = false; a.x += 7 * dt; a.y += 5 * dt; }                                     // and away up
+      } else if (a.kind === 'boar') {
+        if (a.carry && f.ride > 0) a.x = f.x;                                                       // the fox on its back
+        else { a.carry = false; a.x += 10 * dt; }                                                   // and on running
+      }
+    }
+  }
+
+  // drawing
+  const ground = () => H * 0.84;
+  const toScreen = (x, y) => ({ x: (x - S.cam.x) * S.cam.s + W * 0.3, y: ground() - y * S.cam.s });
+  function draw(dt) {
+    if (S.phase === 'sky') { drawSky(dt); skyBar(S.sky); blackout(); return; }
+    const f = S.fox;
+    // the camera: the fox a third along, drawn smaller as it goes higher (so it stays in sight)
+    const base = H / CAM.metres, want = Math.max(base * CAM.least, Math.min(base, (ground() - H * 0.18) / Math.max(1, f.y + FOX_H + (f.soar ? 2.6 : 1)))); // (gliding: room over it for its paraglider)
+    S.cam.s += (want - S.cam.s) * Math.min(1, dt * 4);
+    const cx = Math.max(0, f.x); // (still while it's pulled back)
+    S.cam.scroll += (cx - S.cam.x) * S.cam.s; // how far the ground has gone by on screen, px — the hills go by a share of it (not cam.x × scale: that jumps as the camera zooms)
+    S.cam.x = cx;
+    const s = S.cam.s;
+    g.save();
+    if (S.shake > 0) g.translate((Math.random() - 0.5) * S.shake * 12, (Math.random() - 0.5) * S.shake * 12); // (a gentle shake)
+    // sky, hills far and near (moving less than the ground)
+    const sky = g.createLinearGradient(0, 0, 0, ground());
+    sky.addColorStop(0, LOOK.sky[0]); sky.addColorStop(1, LOOK.sky[1]);
+    g.fillStyle = sky; g.fillRect(-20, -20, W + 40, H + 40);
+    // the layers behind, far to near, each going by faster: GPT's strips (B01, docs/gpt_background.md) once there,
+    // else drawn here
+    if (LOOK.night) night(dt);
+    if (BG.clouds) strip(BG.clouds, 0.05, H * 0.03, H * 0.2, S.t * 6);
+    if (BG.far) strip(BG.far, 0.15, ground() - H * 0.4, H * 0.36);
+    else { hills(0.15, '#bfe3c6', H * 0.18, 0.004); hills(0.35, '#9fd4a5', H * 0.12, 0.009); }
+    if (BG.trees) strip(BG.trees, 0.5, ground() - H * 0.24 + 4, H * 0.24);
+    else for (let k = Math.floor((S.cam.x * 0.5 - 40) / 7); k < (S.cam.x * 0.5 + 60) / 7; k++) { // trees along the back (at half the ground's pace)
+      const tx = (k * 7 - S.cam.x * 0.5) * s + W * 0.3 + ((k * 37) % 11), ty = ground() - 2;
+      const th = s * (3 + ((k * 13) % 5) * 0.6);
+      g.fillStyle = '#7a5a3a'; g.fillRect(tx - s * 0.15, ty - th * 0.4, s * 0.3, th * 0.4);
+      g.fillStyle = (k % 3) ? '#5fb36a' : '#4fa35d';
+      g.beginPath(); g.ellipse(tx, ty - th * 0.6, th * 0.32, th * 0.42, 0, 0, Math.PI * 2); g.fill();
+    }
+    // ground
+    if (BG.ground) { g.fillStyle = LOOK.soil; g.fillRect(-20, ground(), W + 40, H); strip(BG.ground, 1, ground() - (H - ground()) * LOOK.lip, (H - ground()) * (1 + LOOK.lip)); }
+    else {
+      g.fillStyle = '#7cc46a'; g.fillRect(-20, ground(), W + 40, H);
+      g.fillStyle = '#6ab35a';
+      for (let k = Math.floor((S.cam.x - 40) / 2); k < (S.cam.x + 80) / 2; k++) { const p = toScreen(k * 2, 0); if (k % 2) g.fillRect(p.x, ground(), 2 * s, H - ground()); }
+      g.fillStyle = '#9b7653'; g.fillRect(-20, ground() + Math.max(14, s * 0.6), W + 40, H);
+    }
+    // distance signs every 50 m, and the farthest flag
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    for (let m = Math.ceil((S.cam.x - 30) / 50) * 50; m < S.cam.x + 80; m += 50) {
+      if (m <= 0) continue;
+      const p = toScreen(m, 0);
+      g.fillStyle = '#7a5a3a'; g.fillRect(p.x - 2, p.y - s * 1.6, 4, s * 1.6);
+      g.fillStyle = '#fff6e6'; roundRect(p.x - s * 0.8, p.y - s * 2.1, s * 1.6, s * 0.7, 6); g.fill();
+      g.fillStyle = '#7a5a3a'; g.font = `800 ${Math.round(s * 0.42)}px sans-serif`; g.fillText(`${m}m`, p.x, p.y - s * 1.75);
+    }
+    if (best > 0) {
+      const p = toScreen(best, 0);
+      g.fillStyle = '#fff'; g.fillRect(p.x - 2, p.y - s * 3, 4, s * 3);
+      g.fillStyle = '#ff6b6b'; g.beginPath(); g.moveTo(p.x + 2, p.y - s * 3); g.lineTo(p.x + s * 1.2, p.y - s * 2.6); g.lineTo(p.x + 2, p.y - s * 2.2); g.fill();
+      g.fillStyle = '#fff'; g.font = `800 ${Math.round(s * 0.36)}px sans-serif`; g.fillText('最遠', p.x + s * 0.5, p.y - s * 3.4);
+    }
+    // the little tree it's flung from: its top where the fox is pulled to, whipping back and forth after the fling
+    { let tx = PULL.rest[0], ty = PULL.rest[1];
+      if (S.phase === 'aim' || S.phase === 'idle') { tx = f.x; ty = f.y; }
+      else if (S.spring) { const t = S.spring.t, k = Math.exp(-t * 5) * Math.cos(t * 22); tx += S.spring.x * k; ty += S.spring.y * k; }
+      if (TREE.base && TREE.crown) drawTree(tx, ty, s);
+      else {
+        const b = toScreen(-0.5, 0), tip = toScreen(tx, ty), mid = toScreen(-0.5, ty * 0.55);
+        g.strokeStyle = '#7a5a3a'; g.lineCap = 'round'; g.lineWidth = s * 0.3;
+        g.beginPath(); g.moveTo(b.x, b.y); g.quadraticCurveTo(mid.x, mid.y, tip.x, tip.y); g.stroke();
+        for (const [ox, oy, r, c] of [[-0.8, 0.2, 0.5, '#4fa35d'], [-0.35, 0.75, 0.6, '#5fb36a'], [0.3, 0.45, 0.45, '#4fa35d']]) {
+          const q = toScreen(tx + ox, ty + oy); g.fillStyle = c; g.beginPath(); g.arc(q.x, q.y, r * s, 0, Math.PI * 2); g.fill();
+        }
+      }
+    }
+    // the way it'll go, while pulled
+    if (S.phase === 'aim' && S.drag && S.power * PULL.max >= PULL.least) {
+      const v = aimed(); let x = f.x, y = f.y + 0.6, vx = v.vx, vy = v.vy;
+      g.fillStyle = '#fff';
+      for (let i = 1; i <= 14; i++) {
+        for (let k = 0; k < 4; k++) { x += vx * 0.02; y += vy * 0.02; vy -= G * 0.02; }
+        const q = toScreen(x, y); g.globalAlpha = 1 - i / 15; g.beginPath(); g.arc(q.x, q.y, s * 0.12, 0, Math.PI * 2); g.fill();
+      }
+      g.globalAlpha = 1;
+    }
+    // friends (the owl and the boar after the fox, carrying it)
+    const carriers = S.friends.filter(a => a.carry && a.kind === 'owl');
+    for (const a of S.friends) if (!carriers.includes(a)) drawFriend(a, s);
+    // stars, twinkling
+    g.textBaseline = 'middle'; g.textAlign = 'center'; g.font = `${Math.round(s * 0.8)}px sans-serif`;
+    for (const a of S.stars) if (!a.got) {
+      const p = toScreen(a.x, a.y), k = 1 + Math.sin(S.t * 6 + a.x * 3 + a.y) * 0.15;
+      g.save(); g.translate(p.x, p.y); g.scale(k, k); if (LOOK.night) candy(0, 0, s * 0.36, a.x + a.y); else g.fillText('⭐', 0, 0); g.restore();
+    }
+    // the fox
+    drawFox(f, s);
+    { const p = toScreen(f.x, f.y), size = s * FOX_H * 1.25; glints(p.x, p.y - size * 0.45, size, dt); }
+    if (S.fade?.mid === toSky) { const q = toScreen(f.x, f.y + 0.6); smoke({ x: q.x, y: q.y, s: s * 1.6 / LANE() }, S.fade.t * 1.4); } // (up into the clouds: a puff of them)
+    for (const a of carriers) drawFriend(a, s);
+    // bits: dust, fire, rainbow, confetti, words
+    const life = e => e.kind === 'text' ? 1 : e.kind === 'bit' ? 2 : e.kind === 'rain' ? 0.8 : e.kind === 'star' ? 0.9 : e.kind === 'ring' ? 0.45 : 0.6;
+    S.fx = S.fx.filter(e => (e.t += dt) < life(e));
+    for (const e of S.fx) {
+      if (e.kind !== 'text') { e.x += (e.vx || 0) * dt; e.y += (e.vy || 0) * dt; if (e.kind === 'bit') e.vy -= G * 0.5 * dt; if (e.kind === 'star') { e.vx *= 0.94; e.vy = e.vy * 0.94 - 2 * dt; } }
+      const p = toScreen(e.x, e.y + (e.kind === 'text' ? e.t * 1.2 : 0));
+      g.globalAlpha = Math.max(0, 1 - e.t / life(e));
+      if (e.kind === 'dust') { g.fillStyle = '#e8d8c0'; g.beginPath(); g.arc(p.x, p.y, s * (0.2 + e.t * 0.4), 0, Math.PI * 2); g.fill(); }
+      else if (e.kind === 'fire') { g.fillStyle = e.t < 0.2 ? '#ffe14d' : '#ff8a3d'; g.beginPath(); g.arc(p.x, p.y, s * (0.45 - e.t * 0.6), 0, Math.PI * 2); g.fill(); }
+      else if (e.kind === 'rain') { g.fillStyle = e.c; g.beginPath(); g.arc(p.x, p.y, s * (0.5 - e.t * 0.5), 0, Math.PI * 2); g.fill(); }
+      else if (e.kind === 'bit') { g.fillStyle = e.c; g.fillRect(p.x, p.y, s * 0.2, s * 0.3); }
+      else if (e.kind === 'star') { // a rainbow star, spinning, shrinking away
+        const r = s * e.r * (1 - e.t / 0.9 * 0.7), a0 = e.spin + e.t * 8;
+        g.globalAlpha = 1 - e.t / 0.9; g.fillStyle = e.c; g.beginPath();
+        for (let i = 0; i < 10; i++) { const a = a0 + i * Math.PI / 5, rr = i % 2 ? r * 0.45 : r; g.lineTo(p.x + Math.cos(a) * rr, p.y + Math.sin(a) * rr); }
+        g.closePath(); g.fill(); g.globalAlpha = 1;
+      }
+      else if (e.kind === 'ring') { // the burst's flash: a rainbow ring going out
+        const k = e.t / 0.45; g.globalAlpha = 1 - k; g.lineWidth = s * 0.25 * (1 - k);
+        const gr = g.createLinearGradient(p.x - s * 4, p.y, p.x + s * 4, p.y); ['#ff5e5e', '#ffb347', '#ffe14d', '#7be37b', '#5ec8ff', '#b07cff'].forEach((c, i) => gr.addColorStop(i / 5, c));
+        g.strokeStyle = gr; g.beginPath(); g.arc(p.x, p.y, s * (0.5 + k * 4), 0, Math.PI * 2); g.stroke(); g.globalAlpha = 1;
+      }
+      else {
+        g.textAlign = 'center'; g.font = `900 ${Math.round(s * e.size)}px sans-serif`; g.lineWidth = 4; g.strokeStyle = '#0005';
+        g.strokeText(e.text, p.x, p.y); g.fillStyle = e.color; g.fillText(e.text, p.x, p.y);
+      }
+      g.globalAlpha = 1;
+    }
+    g.restore();
+    offscreen(f, s);
+    blackout();
+  }
+  function blackout() { // (into and out of the clouds)
+    if (!S.fade) return;
+    g.fillStyle = `rgba(0, 0, 0, ${Math.min(1, 1 - Math.abs(S.fade.t / (FADE / 2) - 1))})`; g.fillRect(0, 0, W, H);
+  }
+
+  // the cloud road, seen from just behind the fox (as the forest run's road): z ahead, in view units of ZV m
+  const ZV = 3, FAR = 70, CAMZ = 7, HOR = () => H * 0.36, NEAR = () => H * 0.86, LANE = () => H * 0.2;
+  function project(x, z) {
+    const s = CAMZ / (CAMZ + Math.max(-CAMZ * 0.9, z));
+    return { x: W / 2 + x * LANE() * s, y: HOR() + (NEAR() - HOR()) * s, s };
+  }
+  function puff(x, y, r, shade = '#dfe6ff') { // a round lump of cloud, a little shadow under it
+    g.fillStyle = shade; g.beginPath(); g.arc(x, y + r * 0.18, r, 0, 7); g.fill();
+    g.fillStyle = '#fff'; g.beginPath(); g.arc(x, y, r * 0.92, 0, 7); g.fill();
+  }
+  // a cartoon puff of smoke: round grey-white clouds with a dark outline, bursting out and up, swelling, then gone
+  const SMOKE = Array.from({ length: 9 }, (_, k) => ({ a: k / 9 * Math.PI * 2 + (k % 2) * 0.3, r: 0.8 + (k * 37 % 5) * 0.12, up: 0.5 + (k * 13 % 4) * 0.25 }));
+  const SPLASH = (3.4 + Math.sqrt(3.4 ** 2 + 4 * 6 * 0.9)) / 12; // (s into the leap: down to the sea of cloud, 0.9 lanes below — see the leap's lift)
+  // a sweet (or a star) eaten: glints of light popping out on the fox here and there, each a four-pointed twinkle
+  // that swells and turns and is gone (S.glints: where on it, of its size)
+  function glints(x, y, size, dt) {
+    for (let i = S.glints.length - 1; i >= 0; i--) {
+      const a = S.glints[i]; a.t += dt;
+      if (a.t > 0.45) { S.glints.splice(i, 1); continue; }
+      if (a.t < 0) continue;
+      const k = Math.sin(a.t / 0.45 * Math.PI), r = a.r * size * k, px = x + a.x * size * 0.5, py = y + a.y * size * 0.5;
+      g.save(); g.translate(px, py); g.rotate(a.spin + a.t * 3);
+      const glow = g.createRadialGradient(0, 0, 0, 0, 0, r * 1.6);
+      glow.addColorStop(0, 'rgba(255, 250, 210, 0.9)'); glow.addColorStop(1, 'rgba(255, 230, 120, 0)');
+      g.fillStyle = glow; g.beginPath(); g.arc(0, 0, r * 1.6, 0, 7); g.fill();
+      g.fillStyle = '#fffbe6'; g.beginPath();
+      for (let q = 0; q < 8; q++) { const ang = q * Math.PI / 4, d = q % 2 ? r * 0.22 : r * 1.3; g.lineTo(Math.cos(ang) * d, Math.sin(ang) * d); }
+      g.closePath(); g.fill();
+      g.restore();
+    }
+  }
+  function smoke(p, t) {
+    const L = LANE() * p.s, k = Math.min(1, t / 0.18), fade = Math.max(0, 1 - Math.max(0, t - 0.35) / 0.9);
+    if (fade <= 0) return;
+    g.save(); g.globalAlpha = fade; g.lineWidth = Math.max(2, L * 0.03); g.strokeStyle = '#5a4a7a';
+    for (const pass of [0, 1]) for (const m of SMOKE) {
+      const d = L * (0.25 + 0.7 * (1 - Math.exp(-t * 6))) * m.r, x = p.x + Math.cos(m.a) * d * 1.4;
+      const y = p.y + Math.sin(m.a) * d * 0.45 - L * m.up * t * 0.9, r = L * (0.1 + 0.16 * k) * m.r * (0.6 + fade * 0.4);
+      g.beginPath(); g.arc(x, y, r, 0, 7);
+      if (pass) { g.fillStyle = '#f4f1ff'; g.fill(); g.fillStyle = '#ffffff'; g.beginPath(); g.arc(x - r * 0.25, y - r * 0.25, r * 0.45, 0, 7); g.fill(); }
+      else g.stroke(); // (outlines first, all under the puffs: one cloud's outline, not each's)
+    }
+    g.restore();
+  }
+  function drawCard(c, cx, y, w, glow) { // a card drawn on the canvas: its tier's colours, its picture and badge, what it does
+    const h = w * 1.3, x = cx - w / 2, [c0, c1] = TIER_COLOR[c.tier], gr = g.createLinearGradient(0, y, 0, y + h);
+    gr.addColorStop(0, c0); gr.addColorStop(1, c1);
+    if (glow) { g.shadowColor = '#fff6a8'; g.shadowBlur = w * 0.3; }
+    g.fillStyle = gr; g.strokeStyle = glow ? '#fff6a8' : '#fff'; g.lineWidth = Math.max(1.5, w * (glow ? 0.07 : 0.045));
+    g.beginPath(); g.roundRect ? g.roundRect(x, y, w, h, w * 0.14) : g.rect(x, y, w, h); g.fill(); g.shadowBlur = 0; g.stroke();
+    const art = artOf(c);
+    if (art) { const a = w * 0.78; g.drawImage(art, cx - a / 2, y + h * 0.3 - a * 0.5, a, a); }
+    else { g.fillStyle = '#fff'; g.font = `${Math.round(w * 0.42)}px sans-serif`; g.fillText(c.icon(), cx, y + h * 0.3); }
+    g.fillStyle = '#fff';
+    if (!art) g.font = `${Math.round(w * 0.22)}px sans-serif`, g.fillText(c.badge, cx + w * 0.26, y + h * 0.44); // (a picture of its own says it already)
+    if (c.val) g.font = `900 ${Math.round(w * 0.2)}px sans-serif`, g.fillText(c.val, cx, y + h * 0.64);
+    if (w > 60) { const n = c.name(), cut = Math.ceil(n.length / 2), big = !c.val; // (no figure: its words larger, higher)
+      g.font = `${big ? 900 : 700} ${Math.round(w * (big ? 0.12 : 0.085))}px sans-serif`; g.fillText(n.slice(0, cut), cx, y + h * (big ? 0.7 : 0.8)); g.fillText(n.slice(cut), cx, y + h * (big ? 0.83 : 0.9)); }
+  }
+  function drawRoadCards(sky) { // the three cards at the road's end: as it brakes, up large over it (as large as the start's);
+    sky.cardRects = [];          // a tap on one, and it leaps that way — the one chosen flying to it, the others fading
+    const e = sky.end; if (!e || !sky.hand) return;
+    const T = 2 * ROADEND.brake / SKY.speed, k = Math.min(1, e.t / (T * 0.8)), ease = 1 - (1 - k) ** 3, look = e.stage === 'look';
+    const w = Math.min(200, W * 0.25, H * 0.38), gap = w * 1.1, top = H * 0.2;
+    sky.hand.forEach((c, i) => {
+      if (sky.took === i) return;
+      let cx = W / 2 + (i - 1) * gap * ease, y = top - (1 - ease) * H * 0.25, cw = w * (0.4 + 0.6 * ease);
+      g.save(); g.globalAlpha = ease;
+      if (e.stage === 'leap') {
+        const L = Math.min(1, sky.leap / 0.3);
+        if (e.pick === i) { const p = project(sky.x, sky.leap * SKY.speed / ZV * 0.7); cx += (p.x - cx) * L; y += (p.y - H * 0.25 - y) * L; cw *= 1 - L * 0.7; } // (into its paws)
+        else g.globalAlpha = Math.max(0, 1 - L * 1.5);
+      }
+      drawCard(c, cx, y + (look ? Math.sin(S.t * 3 + i) * w * 0.02 : 0), cw, look && Math.sin(S.t * 5 - i * 1.2) > 0.6);
+      g.restore();
+      if (look) sky.cardRects[i] = { x: cx - cw / 2, y, w: cw, h: cw * 1.3 };
+    });
+    if (look) { g.fillStyle = '#fff'; g.strokeStyle = '#7a6fd0'; g.lineWidth = Math.max(3, H * 0.008); g.font = `900 ${Math.round(H * 0.05)}px sans-serif`;
+      g.strokeText('點一張卡跳下去！', W / 2, top - H * 0.05); g.fillText('點一張卡跳下去！', W / 2, top - H * 0.05); }
+  }
+  function skyBar(sky) { // its star bar, along the top: full, a gold card at the end for sure (the fewer, the lower the cards)
+    if (!sky.need || sky.end?.t > 2 * ROADEND.brake / SKY.speed * 0.6) return; // (gone as the cards come up)
+    const k = Math.min(1, sky.got / sky.need), w = Math.min(W * 0.4, H * 0.9), h = H * 0.04, x = (W - w) / 2, y = H * 0.135, full = k >= 1;
+    g.save();
+    g.fillStyle = '#ffffffcc'; g.beginPath(); g.roundRect ? g.roundRect(x - h * 0.3, y - h * 0.3, w + h * 2.2, h * 1.6, h * 0.8) : g.rect(x - h * 0.3, y - h * 0.3, w + h * 2.2, h * 1.6); g.fill();
+    g.fillStyle = '#e6e2fb'; g.beginPath(); g.roundRect ? g.roundRect(x, y, w, h, h / 2) : g.rect(x, y, w, h); g.fill();
+    if (k > 0) {
+      const gr = g.createLinearGradient(x, 0, x + w, 0); ['#ff8a8a', '#ffc15e', '#ffe14d', '#7be37b', '#5ec8ff', '#b07cff'].forEach((c, i) => gr.addColorStop(i / 5, c));
+      g.fillStyle = gr; g.beginPath(); g.roundRect ? g.roundRect(x, y, Math.max(h, w * k), h, h / 2) : g.rect(x, y, w * k, h); g.fill();
+    }
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.font = `${Math.round(h * 1.1)}px sans-serif`; g.fillText(star(), x - h * 0.05, y + h / 2);
+    g.font = `900 ${Math.round(h * 0.75)}px sans-serif`; g.fillStyle = '#5b4fb0'; g.fillText(`${Math.min(sky.got, sky.need)} / ${sky.need}`, x + w / 2, y + h / 2 + 1);
+    const cx = x + w + h * 1.05, cy = y + h / 2, pulse = full ? 1 + Math.sin(S.t * 8) * 0.08 : 1; // (the gold card it fills up to)
+    g.globalAlpha = full ? 1 : 0.45; g.fillStyle = full ? '#ffd25a' : '#d8cfa0'; g.strokeStyle = '#fff'; g.lineWidth = 2;
+    g.save(); g.translate(cx, cy); g.scale(pulse, pulse); g.beginPath(); g.roundRect ? g.roundRect(-h * 0.5, -h * 0.68, h, h * 1.36, h * 0.15) : g.rect(-h * 0.5, -h * 0.68, h, h * 1.36); g.fill(); g.stroke();
+    g.fillStyle = '#fff'; g.font = `900 ${Math.round(h * 0.5)}px sans-serif`; g.fillText('金', 0, 1); g.restore();
+    g.restore();
+  }
+  function drawSky(dt) {
+    const sky = S.sky, zv = sky.z / ZV, left = (SKY.run - sky.z) / ZV; // (left: how far on the road still goes)
+    const hy = HOR(), grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, LOOK.clouds[0]); grad.addColorStop(0.36, LOOK.clouds[1]); grad.addColorStop(1, LOOK.clouds[2]);
+    g.fillStyle = grad; g.fillRect(0, 0, W, H);
+    if (LOOK.night) night(dt);
+    if (BG.clouds) { // high clouds drifting, and far ones along the horizon
+      strip(BG.clouds, 0, H * 0.02, H * 0.16, S.t * 10);
+      g.globalAlpha = 0.8; strip(BG.clouds, 0, hy - H * 0.09, H * 0.11, S.t * 4 + zv * 2); g.globalAlpha = 1;
+    }
+    // a sea of cloud down from the horizon, lumps of it going by on both sides
+    const k0 = Math.floor(zv / 2.5);
+    for (let k = k0 + 28; k >= k0 - 2; k--) {
+      const z = k * 2.5 - zv; if (z < -CAMZ * 0.8 || z > FAR) continue;
+      for (const side of [-1, 1]) {
+        const off = 2.6 + (((k * 37 + (side > 0 ? 11 : 0)) % 7) + 7) % 7 * 0.45, p = project(side * off, z);
+        puff(p.x, p.y, LANE() * p.s * (0.7 + (((k * 13) % 5) + 5) % 5 * 0.12), '#d9dcff');
+      }
+    }
+    // past the road's end, a lower sea of cloud (where the fox leaps down into it); elsewhere under the road, the sky
+    if (left < FAR) for (let z = FAR; z > left - 1; z -= 1.4) for (let x = -3.2; x <= 3.21; x += 0.8) {
+      const q = project(x + (Math.round(z / 1.4) % 2) * 0.4, z);
+      puff(q.x, q.y + LANE() * q.s * 0.9, LANE() * q.s * 0.55, '#d9dcff');
+    }
+    // the road: a lane-wide ribbon of white cloud winding over the lanes, lumpy along both edges, ending where the run does
+    const end = Math.min(FAR, left), zs = [], at = z => roadAt(sky, sky.z + z * ZV);
+    for (let k = 0; k <= 120; k++) zs.push(-CAMZ * 0.6 + (end + CAMZ * 0.6) * (k / 120) ** 1.6);
+    const edge = side => zs.map(z => project(at(z)[side], z)), L = edge(0), R = edge(1);
+    g.beginPath(); // (its side, in shade, under it: the road's thickness)
+    L.forEach((p, i) => i ? g.lineTo(p.x, p.y + LANE() * p.s * 0.35) : g.moveTo(p.x, p.y + LANE() * p.s * 0.35)); [...R].reverse().forEach(p => g.lineTo(p.x, p.y + LANE() * p.s * 0.35));
+    g.closePath(); g.fillStyle = '#b8b4e8'; g.fill();
+    g.fillStyle = '#ffffff'; g.beginPath();
+    L.forEach((p, i) => i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)); [...R].reverse().forEach(p => g.lineTo(p.x, p.y));
+    g.closePath(); g.fill();
+    g.strokeStyle = '#d8d4fa'; g.lineCap = 'round'; // (the lanes: soft dashes between them, going by)
+    for (const x of [-0.5, 0.5]) for (let z = -((zv * 1) % 2); z < end; z += 2) {
+      if (z < -CAMZ * 0.5) continue; const a = project(x, z), b = project(x, Math.min(end, z + 1));
+      g.lineWidth = Math.max(1, LANE() * a.s * 0.05); g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke();
+    }
+    for (let k = Math.ceil(end / 0.9); k >= -6; k--) { // the lumps along its edges, far to near
+      const z = k * 0.9 - (zv % 0.9); if (z > end) continue;
+      const e = at(z); for (const side of [-1, 1]) { const p = project(e[side > 0 ? 1 : 0], z); puff(p.x, p.y, LANE() * p.s * (0.2 + ((k * 7 + side + 9) % 3) * 0.035)); }
+    }
+    if (left < FAR) { const [l, r] = at(left); for (let x = l; x <= r + 0.01; x += 0.3) { const q = project(x, left); puff(q.x, q.y, LANE() * q.s * 0.3); } } // (its far end, rounded)
+    // stars on it, far to near, then the fox
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    for (let i = sky.stars.length - 1; i >= 0; i--) {
+      const a = sky.stars[i]; if (a.got) continue;
+      const z = (a.z - sky.z) / ZV; if (z < -1 || z > FAR) continue;
+      const p = project(a.lane, z), r = LANE() * p.s * 0.5, k = 1 + Math.sin(S.t * 6 + a.z) * 0.12;
+      if (LOOK.night) candy(p.x, p.y - r * 1.2, r * 0.6 * k, a.z); else { g.font = `${Math.round(r * 1.4 * k)}px sans-serif`; g.fillText('⭐', p.x, p.y - r * 1.2); }
+    }
+    drawRoadCards(sky); g.textAlign = 'center'; g.textBaseline = 'middle'; // (the cards at its end: under the fox, over the road)
+    // the fox bounding on, a bound each SKY.hop s (crouched, up, stretched out, down: back_crouch_to_back_air +
+    // back_air_to_back_crouch); at the end one more, a big one out off it, away and down into the cloud below
+    const up = A.up || [], down = A.down || [], hops = [...up, ...down.slice(1, -1)];
+    let z = 0, lift = 0, im;
+    if (sky.intro < SKY.intro) { // up out of the cloud (from inside it, the road's top hiding its lower part), and down onto it
+      const u = sky.intro / SKY.intro; lift = -1.2 * (1 - u) + 5.2 * u * (1 - u);
+      im = u < 0.45 ? up[Math.min(up.length - 1, Math.floor(u / 0.45 * up.length))] : down[Math.min(down.length - 1, Math.floor((u - 0.45) / 0.55 * down.length))];
+    } else if (sky.fall >= 0) { // down through a hole
+      lift = -9 * sky.fall * sky.fall - 0.4 * sky.fall;
+      im = tipping() ? TIP[Math.min(TIP.length - 1, Math.floor(sky.fall / TIP_S))] : A.down?.at(-1) || up.at(-1);
+    } else if (sky.leap >= 0) {
+      const L = sky.leap; z = L * SKY.speed / ZV * 0.7; lift = 3.4 * L - 6 * L * L; // (lane widths)
+      const off = sky.end && A.sitUp?.length ? A.sitUp : up; // (from sitting, at the end: up off its seat)
+      im = L < 0.25 ? off[Math.min(off.length - 1, Math.floor(L / 0.25 * off.length))] : off.at(-1);
+    } else if (sky.end) { // braking (its clip through once), then sat looking left and right
+      const e = sky.end, T = 2 * ROADEND.brake / SKY.speed, br = A.brake?.length ? A.brake : down, lk = A.look?.length ? A.look : [br.at(-1)];
+      im = e.t < T ? br[Math.min(br.length - 1, Math.floor(e.t / T * br.length))] : lk[Math.floor((e.t - T) * 12) % lk.length];
+    } else {
+      const u = (sky.t / SKY.hop) % 1;
+      lift = Math.sin(Math.PI * u) * 0.45; im = hops[Math.floor(u * hops.length)];
+    }
+    const p = project(sky.x, z), size = H * 0.32 * p.s, rise = lift * LANE() * p.s;
+    if (sky.pop < 1.4) smoke(project(0, -sky.z / ZV), sky.pop); // (a cartoon burst of smoke where it popped out)
+    if (sky.end?.smoke?.length) { // (its skid's trail: far to near, each puff growing, rising a little, fading)
+      const ps = [...sky.end.smoke].sort((a, b) => b.z - a.z);
+      for (const p of ps) { const z = (p.z - sky.z) / ZV; if (z < -CAMZ * 0.7) continue; const q = project(p.x, z), k = p.t / 0.9;
+        g.globalAlpha = Math.max(0, 1 - k) * 0.9; puff(q.x, q.y - LANE() * q.s * (p.up + k * 0.4), LANE() * q.s * (p.r * 1.4 + k * 0.42), '#b9b0ec'); }
+      g.globalAlpha = 1;
+    }
+    if (sky.leap > SPLASH) { // (and where it dives into the sea of cloud below)
+      const q = project(sky.x, SPLASH * SKY.speed / ZV * 0.7); smoke({ x: q.x, y: q.y + LANE() * q.s * 0.9, s: q.s }, sky.leap - SPLASH);
+    }
+    g.save(); if (lift < 0 && sky.fall < 0) { g.beginPath(); g.rect(0, 0, W, p.y + (sky.leap >= 0 ? LANE() * p.s * 0.9 : 0)); g.clip(); } // (what's inside the cloud, hidden: the road, or the sea below it)
+    if (sky.leap < 0 && lift >= 0) { g.fillStyle = '#c9cdf266'; g.beginPath(); g.ellipse(p.x, p.y, size * 0.2 * (1 - lift * 0.4), size * 0.05, 0, 0, 7); g.fill(); }
+    g.save(); g.translate(p.x, p.y - rise); g.rotate(sky.fall >= 0 ? 0 : (sky.lane - sky.x) * -0.25); // (leaning into a lane change)
+    if (sky.fall >= 0 && tipping() && sky.fellAt < 0) g.scale(-1, 1); // (going over to its left: the frames mirrored)
+    if (sky.fall >= 0) g.globalAlpha = Math.max(0, 1 - Math.max(0, sky.fall - FALL_IN) * 3); // (down out of sight, behind the puff)
+    if (sky.intro < SKY.intro) { const u = sky.intro / SKY.intro, k = u < 0.5 ? 0.25 * (1 - u * 2) : u > 0.85 ? -0.3 * Math.sin((u - 0.85) / 0.15 * Math.PI) : 0; g.scale(1 - k * 0.6, 1 + k); } // (stretched shooting up, squashed landing)
+    if (S.ready) { // (a super bounce waiting: its glow)
+      const rg = g.createRadialGradient(0, -size * 0.4, size * 0.1, 0, -size * 0.4, size * 0.6);
+      rg.addColorStop(0, 'rgba(255, 225, 77, 0.6)'); rg.addColorStop(1, 'rgba(255, 225, 77, 0)');
+      g.fillStyle = rg; g.beginPath(); g.arc(0, -size * 0.4, size * 0.6, 0, 7); g.fill();
+    }
+    tails(im, -size / 2, -size * 449 / 480, size, sky.t, 'fly');
+    if (im?.complete && im.naturalWidth) g.drawImage(im, -size / 2, -size * 449 / 480, size, size); // (feet at y 449 of 480 in its frames)
+    else { g.font = `${Math.round(size * 0.5)}px sans-serif`; g.fillText('🦊', 0, -size * 0.3); }
+    tails(im, -size / 2, -size * 449 / 480, size, sky.t, 'fly', 'front'); // (seen from behind: its tails over its back)
+    glints(0, -size * 0.45, size, dt);
+    g.restore(); g.restore();
+    if (sky.fall > FALL_IN * 0.5) { const q = project(sky.fellAt, 0); smoke({ x: q.x, y: q.y + LANE() * q.s * 0.6, s: q.s }, sky.fall - FALL_IN * 0.5); } // (a puff of cloud as it goes under: as at the road's end)
+  }
+
+  function offscreen(f, s) { // up out of sight: an arrow along the top where it is, and how high
+    const top = toScreen(f.x, f.y + FOX_H * 0.8);
+    if (S.phase !== 'fly' || top.y > H * 0.13) return;
+    const x = Math.max(34, Math.min(W - 34, top.x)), y = 116, r = 24; // (below the counters)
+    g.fillStyle = '#ff8a3d'; g.beginPath(); g.moveTo(x, y - r - 14); g.lineTo(x - 10, y - r - 2); g.lineTo(x + 10, y - r - 2); g.fill(); // the arrow
+    g.fillStyle = '#fffdf8'; g.strokeStyle = '#ff8a3d'; g.lineWidth = 3;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); g.stroke();
+    const im = A.run?.[AIR];
+    if (im?.complete && im.naturalWidth) g.drawImage(im, x - r * 1.1, y - r * 1.25, r * 2.2, r * 2.2);
+    g.font = '900 15px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'top'; g.lineWidth = 4; g.strokeStyle = '#0006';
+    const t = `${Math.round(f.y)} m`; g.strokeText(t, x, y + r + 4); g.fillStyle = '#fff'; g.fillText(t, x, y + r + 4);
+  }
+  function drawFriend(a, s) {
+    const fr = FRIENDS[a.kind], p = toScreen(a.x, a.y), sz = s * fr.h * 1.15, t = a.t;
+    g.save(); g.translate(p.x, p.y);
+    if (a.kick) { g.translate(0, -sz * 0.4); g.rotate(-t * 14); g.translate(0, sz * 0.4); } // (tumbling away)
+    else if (a.roll || (a.kind === 'hedgehog' && a.spin)) { const r = ROLL.r * s; g.translate(0, -r); g.rotate(a.spin); g.translate(0, r); } // (curled up, rolling)
+    if (art(a.kind, 'idle')) { drawArt(a, s, t); g.restore(); return; } // (its own picture, once there)
+    if (fr.draw) { fr.draw(a, s, t); g.restore(); return; } // (drawn, not an emoji)
+    if (!a.used) g.scale(1, 1 + Math.sin(S.t * 3 + a.x) * 0.04);                   // breathing, waiting
+    else if (t < 0.15) g.scale(1.35, 0.6);                                          // squashed as the fox lands
+    else if (a.kind === 'mushroom') { const k = Math.sin(t * 22) * Math.exp(-t * 4) * 0.35; g.scale(1 - k, 1 + k); } // springing
+    else if (a.kind === 'hedgehog') { const k = Math.exp(-t * 3); g.rotate(Math.sin(t * 40) * k * 0.15); g.scale(1 + k * 0.3, 1 + k * 0.3); } // bristling
+    else if (a.kind === 'owl' && (a.carry || a.y > 0)) g.scale(1 + Math.sin(t * 18) * 0.12, 1 - Math.sin(t * 18) * 0.08); // flapping
+    else if (a.kind === 'boar') g.translate(0, -Math.abs(Math.sin(t * 16)) * s * 0.12); // trotting
+    g.textAlign = 'center'; g.textBaseline = 'bottom';
+    g.font = `${Math.round(sz)}px sans-serif`;
+    if (a.kind === 'frog' || a.kind === 'boar' || a.kind === 'owl' || a.runTo) { if (a.used) g.scale(-1, 1); } // (turned to go right, as the fox)
+    g.fillText(fr.e, 0, sz * 0.12);
+    g.restore();
+  }
+  // the friends' own pictures (GPT grids F01–F03, docs/gpt_friends.md): assets/friends/<kind>_idle.png waiting,
+  // _hit.png landed on (the owl flying, the boar running, the giraffe's neck swung), _alt.png the other frame of a
+  // flap / a gallop / a hop; all facing left, feet at the bottom of a square. Moving is done here: squash, wobble,
+  // flap and gallop by swapping hit/alt. Until a kind's idle is there, the emoji (or the drawn bear, giraffe) stands in.
+  // ART_M: the square's side, metres
+  const ART_M = { rabbit: 1.37, frog: 1.55, mushroom: 1.76, bear: 2.34, owl: 1.84, boar: 1.77, hedgehog: 1.31, giraffe: 3.66, squirrel: 1.39 };
+  // where it's landed on, when its picture differs from the stand-in: x from its feet, height (the giraffe's head is out front)
+  const ART_HIT = { giraffe: { cx: -1.2, h: 2.4 } };
+  // where its feet are across the 512px square, when not in the middle (the giraffe's head swings the picture's centre about)
+  const ART_FEET = { giraffe_idle: 330, get giraffe_hit() { return LOOK.friends ? 211 : 168; } }; // (H02's giraffe stands a little further right)
+  let ART = {};
+  async function loadFriends() { // (assets/friends/index.json: the names sliced so far, e.g. ["rabbit_idle", "rabbit_hit"])
+    // (on Halloween, their costumes from <LOOK.friends>/ where there, over the everyday ones: the mushroom a pumpkin)
+    const into = {}, look = LOOK;
+    for (const dir of ['assets/friends', look.friends].filter(Boolean)) {
+      const r = await fetch(`${dir}/index.json`).catch(() => null);
+      const names = r?.ok ? await r.json() : [];
+      await Promise.all(names.map(name => new Promise(done => {
+        const [k, n] = name.split('_'), im = pic();
+        im.onload = () => { (into[k] ||= {})[n] = im; done(); }; im.onerror = done; im.src = `${dir}/${name}.png`;
+      })));
+    }
+    if (LOOK === look) ART = into; // (all at once, so no friend is half one look and half the other)
+  }
+  // the friends' close-ups for the super bounce's cut-in (not the mushroom's): <dir>/cutin/<kind>.png, on Halloween
+  // their costumed ones where there (GPT sheets assets/source/gpt/cutin_*.png, tools/grid_split.py)
+  const CUTIN = { dur: 1.5, in: 0.14, out: 0.15 }, CUTINS = {};
+  // its ring countdown: one closing in on the ring in the middle, onto it as the burst goes (with its sound) — a tap
+  // then (from <early> s before to <late> s after) and the super bounce is <boost> as strong again; too soon, missed
+  const TIMING = { early: 0.3, late: 0.1, boost: 1.5, cue: 0.1 }; // (a window of 0.4 s round the burst; "TAP!" up 0.1 s before it opens)
+  const CUTIN_KINDS = ['rabbit', 'frog', 'bear', 'owl', 'giraffe', 'boar', 'hedgehog', 'squirrel'];
+  const CUTIN_COLOR = { rabbit: '#ff4fa3', frog: '#37c24a', bear: '#ff8a1f', owl: '#ffb020', giraffe: '#2f8cff', boar: '#9a3cff', hedgehog: '#22c8d8', squirrel: '#ff5c7a' };
+  function loadCutins() {
+    return Promise.all(['assets/friends', LOOKS.halloween.friends].flatMap(dir => CUTIN_KINDS.map(k => new Promise(done => {
+      const im = pic(); im.onload = () => { (CUTINS[dir] ||= {})[k] = im; done(); }; im.onerror = done; im.src = `${dir}/cutin/${k}.png`;
+    }))));
+  }
+  const cutinOf = k => (LOOK.friends && CUTINS[LOOK.friends]?.[k]) || CUTINS['assets/friends']?.[k] || null;
+  function superBoost() { // tapped as the burst went: half as strong again
+    const f = S.fox; f.vx *= TIMING.boost; f.vy *= TIMING.boost; f.glide *= TIMING.boost; f.ride *= TIMING.boost;
+    S.shake = Math.max(S.shake, 0.6); f.rainbow = Math.max(f.rainbow, 2.6);
+    starBurst(f.x, f.y + 0.6, 36, 15); SFX.perfect();
+    pop('完美！+50%', f.x, f.y + 3.4, '#fff27a', 1.2);
+  }
+  function drawRing(c) { // the countdown: a ring closing in on the one in the middle, onto it at the burst
+    const left = CUTIN.dur - c.t, k = Math.max(0, left / CUTIN.dur), cx = W / 2, cy = H * 0.5, R = H * 0.16;
+    const now = left <= TIMING.early, judged = c.hit !== undefined;
+    if (judged && !c.hit) { // too soon: the rings blown up and fading away fast, and the word a little longer
+      const since = c.t - c.at, u = Math.min(1, since / 0.2);
+      g.save();
+      if (u < 1) {
+        g.globalAlpha = 1 - u; g.strokeStyle = '#fff'; g.lineWidth = H * 0.012 * (1 - u * 0.6);
+        const grow = 1 + u * 1.6, was = 1 + 2 * Math.max(0, (CUTIN.dur - c.at) / CUTIN.dur);
+        g.beginPath(); g.arc(cx, cy, R * grow, 0, Math.PI * 2); g.stroke();
+        g.lineWidth = H * 0.008 * (1 - u * 0.6); g.beginPath(); g.arc(cx, cy, R * was * grow, 0, Math.PI * 2); g.stroke();
+      }
+      const w = Math.min(1, since / 0.6);
+      if (w < 1) {
+        g.globalAlpha = 1 - w * w; g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
+        const fs = Math.round(H * 0.08), y = cy - w * H * 0.06;
+        g.font = `900 ${fs}px 'Arial Rounded MT Bold', 'Nunito', sans-serif`;
+        g.lineWidth = fs * 0.2; g.strokeStyle = '#7a3fd0'; g.strokeText('太早了', cx, y);
+        g.fillStyle = '#fff'; g.fillText('太早了', cx, y);
+      }
+      g.restore(); return;
+    }
+    g.save(); g.lineCap = 'round';
+    g.strokeStyle = judged || now ? '#fff27a' : 'rgba(255, 255, 255, 0.85)'; // (the target)
+    g.lineWidth = H * (now && !judged ? 0.018 : 0.012); g.shadowColor = '#fff27a'; g.shadowBlur = now ? H * 0.04 : 0;
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.stroke(); g.shadowBlur = 0;
+    if (!judged) { // (the one closing in: from three times as big)
+      g.strokeStyle = `rgba(255, 255, 255, ${0.35 + 0.6 * (1 - k)})`; g.lineWidth = H * 0.008;
+      g.beginPath(); g.arc(cx, cy, R * (1 + 2 * k), 0, Math.PI * 2); g.stroke();
+    }
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    const cue = !judged && left <= TIMING.early + TIMING.cue; // (a little before it's time: "TAP!", popping up)
+    if (cue) {
+      const u = Math.min(1, (TIMING.early + TIMING.cue - left) / 0.12), pop = u < 1 ? 0.4 + 0.6 * u + 0.35 * Math.sin(u * Math.PI) : 1 + Math.sin(S.t * 30) * 0.06; // (out of nothing, a bit past, settling; then throbbing)
+      g.save(); g.translate(cx, cy - R * 1.45); g.rotate(Math.sin(S.t * 18) * 0.08); g.scale(pop, pop);
+      const fs = Math.round(H * 0.13), gr = g.createLinearGradient(0, -fs / 2, 0, fs / 2); gr.addColorStop(0, '#ffe36e'); gr.addColorStop(0.55, '#ff9a5a'); gr.addColorStop(1, '#ff5fa2');
+      g.font = `900 ${fs}px 'Arial Rounded MT Bold', 'Nunito', sans-serif`; g.lineJoin = 'round';
+      g.lineWidth = fs * 0.22; g.strokeStyle = '#7a3fd0'; g.strokeText('TAP!', 0, 0);
+      g.lineWidth = fs * 0.1; g.strokeStyle = '#fff'; g.strokeText('TAP!', 0, 0);
+      g.fillStyle = gr; g.fillText('TAP!', 0, 0);
+      g.font = `${Math.round(fs * 0.7)}px sans-serif`; g.fillText('👆', fs * 1.55, fs * 0.25 + Math.sin(S.t * 24) * fs * 0.08); // (a finger tapping)
+      g.restore();
+    }
+    const word = judged ? '完美！' : '';
+    if (word) { g.fillStyle = '#fff'; g.strokeStyle = '#7a3fd0'; g.lineWidth = Math.max(3, H * 0.008); g.font = `900 ${Math.round(H * 0.07)}px sans-serif`; g.strokeText(word, cx, cy); g.fillText(word, cx, cy); }
+    g.restore();
+  }
+  function drawCutin() { // the friend's face in close-up on a band across the screen, speed lines streaming by
+    const c = S.cutin, im = cutinOf(c.kind), t = c.t;
+    const into = Math.min(1, t / CUTIN.in), away = Math.max(0, (t - (CUTIN.dur - CUTIN.out)) / CUTIN.out);
+    const ease = k => 1 - (1 - k) ** 3;
+    g.save();
+    g.fillStyle = `rgba(0, 0, 0, ${0.55 * into * (1 - away)})`; g.fillRect(0, 0, W, H);
+    const bh = H * 0.62 * ease(into) * (1 - ease(away)), cy = H / 2, slant = H * 0.12; // the band, opening and closing
+    g.beginPath(); g.moveTo(0, cy - bh / 2 + slant); g.lineTo(W, cy - bh / 2 - slant); g.lineTo(W, cy + bh / 2 - slant); g.lineTo(0, cy + bh / 2 + slant); g.closePath();
+    g.fillStyle = CUTIN_COLOR[c.kind] || '#ffb347'; g.fill(); g.clip();
+    g.strokeStyle = 'rgba(255, 255, 255, 0.55)'; // (the speed lines: streaming past, right to left, the way it looks)
+    for (let i = 0; i < 26; i++) {
+      const y = cy - H * 0.45 + ((i * 97) % 100) / 100 * H * 0.9, len = W * (0.15 + ((i * 37) % 10) / 25);
+      const x = W - ((t * W * (4.4 + (i % 5) * 0.8) + i * 211) % (W + len * 2)) + len;
+      g.lineWidth = 2 + (i % 4) * 2; g.beginPath(); g.moveTo(x, y); g.lineTo(x + len, y - len * 0.22); g.stroke();
+    }
+    if (im) { // the face (looking right): in from the left, a little shake as it shouts, off to the right
+      const h = H * 0.86, w = h * im.width / im.height, shake = t > CUTIN.in && !away ? Math.sin(t * 120) * H * 0.004 : 0;
+      const x = W * 0.42 - w / 2 - (1 - ease(into)) * W * 0.6 + ease(away) * W * 1.2;
+      g.drawImage(im, x + shake, cy - h / 2 + shake, w, h);
+    }
+    g.restore();
+    drawRing(c);
+    if (t > CUTIN.dur - 0.06) { g.fillStyle = `rgba(255, 255, 255, ${(t - (CUTIN.dur - 0.06)) / 0.06})`; g.fillRect(0, 0, W, H); } // (a flash, into the burst)
+  }
+  const art = (k, n) => ART[k]?.[n] || null;
+  const box = a => (art(a.kind, 'idle') && ART_HIT[a.kind]) || { cx: 0, h: FRIENDS[a.kind].h }; // (where it's landed on)
+  function drawArt(a, s, t) {
+    const k = a.kind, side = s * (ART_M[k] || 1.2);
+    const flip = t * 8 % 1 < 0.5, moving = (k === 'owl' || k === 'boar') && (a.carry || a.x !== a.x0); // (flapping / galloping)
+    let n = 'idle';
+    if (a.used) {
+      if (art(k, 'hit')) n = 'hit';
+      if (moving && !flip && art(k, 'alt')) n = 'alt';
+      if ((k === 'frog' || k === 'rabbit' || k === 'squirrel') && a.y > 0.05 && art(k, 'alt')) n = 'alt'; // (up in a hop)
+    }
+    if (!a.used) g.scale(1, 1 + Math.sin(S.t * 3 + a.x) * 0.03);                    // breathing, waiting
+    else if (t < 0.12 && !moving && k !== 'giraffe') g.scale(1.2, 0.8);                                // squashed as the fox lands
+    else if (k === 'mushroom') { const q = Math.sin(t * 22) * Math.exp(-t * 4) * 0.3; g.scale(1 - q, 1 + q); } // springing
+    else if (k === 'bear') { const q = Math.sin(t * 20) * Math.exp(-t * 4) * 0.12; g.scale(1 + q, 1 - q); }   // its belly bouncing back
+    else if (k === 'hedgehog') g.rotate(Math.sin(t * 40) * Math.exp(-t * 3) * 0.12);   // shaking, bristled
+    else if (k === 'giraffe') { // its head swung up and over (pivoting on its feet), then swaying back
+      const A = art(k, 'hit') ? 0.12 : 0.35; // (less when its picture already has the neck flung)
+      const sw = t < NECK.hold ? Math.sin(t / NECK.hold * Math.PI / 2) * A : A * Math.exp(-(t - NECK.hold) * 4) * Math.cos((t - NECK.hold) * 7);
+      g.rotate(sw);
+    }
+    else if (k === 'boar' && moving) g.translate(0, -Math.abs(Math.sin(t * 16)) * s * 0.1);
+    if (a.used && (k === 'frog' || k === 'boar' || k === 'owl' || a.runTo)) g.scale(-1, 1); // (turned to go right, as the fox)
+    const im = art(k, n), feet = ((ART_FEET[k + '_' + n] ?? 256) - 256) / 512 * side;
+    g.drawImage(im, -side / 2 - feet, -side, side, side);
+  }
+  // the big bear asleep on its back, its belly up (the fox bounces off it; it sleeps on)
+  function drawBear(a, s, t) {
+    const E = (x, y, rx, ry, c, rot = 0) => { g.fillStyle = c; g.beginPath(); g.ellipse(x * s, -y * s, rx * s, ry * s, rot, 0, Math.PI * 2); g.fill(); };
+    const breath = Math.sin(S.t * 2 + a.x) * 0.03, k = a.used ? Math.sin(t * 20) * Math.exp(-t * 4) * 0.35 : 0; // (k: the belly squashed and bouncing back)
+    const bry = (0.46 + breath) * (1 - k), BROWN = '#8b5a3c', CREAM = '#f1d7ae';
+    E(1.0, 0.8, 0.2, 0.3, BROWN, 0.5); E(0.72, 0.95, 0.2, 0.3, BROWN, 0.3);      // its feet up
+    E(1.02, 0.9, 0.11, 0.15, CREAM, 0.5); E(0.74, 1.06, 0.11, 0.15, CREAM, 0.3);
+    E(0, 0.5, 1.15, 0.5, BROWN);                                                   // its body
+    E(0.1, 0.6 + bry * 0.6, 0.85 * (1 + k * 0.4), bry, CREAM);                     // its belly
+    E(-0.35, 0.95 + bry * 0.4, 0.28, 0.14, BROWN, -0.4);                           // a paw on it
+    E(-1.35, 0.9, 0.16, 0.16, BROWN); E(-0.85, 0.95, 0.16, 0.16, BROWN);           // its head: ears,
+    E(-1.1, 0.55, 0.45, 0.42, BROWN);                                              // head,
+    E(-1.2, 0.42, 0.22, 0.15, CREAM); E(-1.28, 0.47, 0.07, 0.05, '#3a2a20');       // snout, nose
+    g.strokeStyle = '#3a2a20'; g.lineWidth = Math.max(1.5, s * 0.05); g.lineCap = 'round';
+    for (const ex of [-1.27, -0.97]) { g.beginPath(); g.arc(ex * s, -0.66 * s, 0.08 * s, 0.15 * Math.PI, 0.85 * Math.PI); g.stroke(); } // eyes shut
+    g.fillStyle = '#5a7dbf'; g.textAlign = 'center'; g.textBaseline = 'middle';    // z z z
+    for (let i = 0; i < 3; i++) {
+      const ph = (S.t * 0.5 + i / 3) % 1;
+      g.globalAlpha = 1 - ph; g.font = `900 ${Math.round(s * (0.3 + ph * 0.25))}px sans-serif`;
+      g.fillText('z', (-1.3 + ph * 0.6) * s, -(1.2 + ph * 1.1) * s);
+    }
+    g.globalAlpha = 1;
+  }
+  // the giraffe: its neck leans out to the fox coming; landed on, it swings it up and over and lets go at 45°
+  const NECK = { base: [0.45, 1.65], len: 1.15, rest: -0.35, swing: 1.0, hold: 0.22 }; // (radians from upright, + forward)
+  function neckAng(a) {
+    if (!a.used) return NECK.rest + Math.sin(S.t * 1.5 + a.x) * 0.04;
+    const t = a.t, d = NECK.swing - NECK.rest;
+    if (t < NECK.hold) return NECK.rest + d * (1 - (1 - t / NECK.hold) ** 2);
+    return NECK.rest + d * Math.exp(-(t - NECK.hold) * 4) * Math.cos((t - NECK.hold) * 7);
+  }
+  function headAt(a) {
+    if (art('giraffe', 'idle')) { // (its picture: the fox carried from its head up and over, forwards)
+      const q = Math.min(1, a.t / NECK.hold), e = 1 - (1 - q) ** 2, b = ART_HIT.giraffe;
+      return { x: a.x + b.cx + 3.0 * e, y: b.h + 0.5 * Math.sin(e * Math.PI / 2) }; // (to where its head is flung, F02)
+    }
+    const n = neckAng(a); return { x: a.x + NECK.base[0] + NECK.len * Math.sin(n), y: NECK.base[1] + NECK.len * Math.cos(n) };
+  }
+  function drawGiraffe(a, s) {
+    const Y = '#f2c14e', SPOT = '#c9852f', n = neckAng(a), [bx, by] = NECK.base;
+    g.strokeStyle = Y; g.lineCap = 'round'; g.lineWidth = s * 0.13;
+    for (const lx of [0.6, 0.8, 1.25, 1.45]) { g.beginPath(); g.moveTo(lx * s, -1.3 * s); g.lineTo(lx * s, 0); g.stroke(); } // legs
+    g.lineWidth = s * 0.05; g.strokeStyle = SPOT; g.beginPath(); g.moveTo(1.6 * s, -1.5 * s); g.lineTo(1.85 * s, -1.05 * s); g.stroke(); // tail
+    g.fillStyle = Y; g.beginPath(); g.ellipse(1.0 * s, -1.45 * s, 0.65 * s, 0.35 * s, 0, 0, Math.PI * 2); g.fill(); // body
+    const hx = bx + NECK.len * Math.sin(n), hy = by + NECK.len * Math.cos(n);
+    g.strokeStyle = Y; g.lineWidth = s * 0.26; g.beginPath(); g.moveTo(bx * s, -by * s); g.lineTo(hx * s, -hy * s); g.stroke(); // neck
+    g.fillStyle = SPOT;
+    for (const [x, y, r] of [[0.8, 1.5, 0.12], [1.15, 1.35, 0.1], [1.35, 1.55, 0.09], [0.95, 1.25, 0.08]]) { g.beginPath(); g.arc(x * s, -y * s, r * s, 0, Math.PI * 2); g.fill(); }
+    for (const q of [0.3, 0.6]) { g.beginPath(); g.arc((bx + (hx - bx) * q) * s, -(by + (hy - by) * q) * s, 0.07 * s, 0, Math.PI * 2); g.fill(); }
+    g.save(); g.translate(hx * s, -hy * s); g.rotate(n * 0.5);                    // head, facing the fox
+    g.strokeStyle = SPOT; g.lineWidth = s * 0.05;
+    for (const ox of [0.0, 0.1]) { g.beginPath(); g.moveTo(ox * s, -0.12 * s); g.lineTo(ox * s, -0.3 * s); g.stroke(); }
+    g.fillStyle = SPOT; for (const ox of [0.0, 0.1]) { g.beginPath(); g.arc(ox * s, -0.32 * s, 0.045 * s, 0, Math.PI * 2); g.fill(); }
+    g.fillStyle = Y; g.beginPath(); g.ellipse(-0.12 * s, 0, 0.3 * s, 0.17 * s, 0, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.ellipse(0.17 * s, -0.08 * s, 0.1 * s, 0.05 * s, -0.4, 0, Math.PI * 2); g.fill(); // ear
+    g.fillStyle = '#3a2a20'; g.beginPath(); g.arc(-0.12 * s, -0.05 * s, 0.04 * s, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.arc(-0.37 * s, 0.03 * s, 0.025 * s, 0, Math.PI * 2); g.fill(); // nostril
+    g.restore();
+  }
+  // on Halloween night the fox wears its vampire cape — side on, GPT's V01, the fox drawn again with it: leaping
+  // (A, three frames of the cape streaming), diving (B, two), crouched on the tree (C); each fitted over the frame it
+  // stands for (same size, same place in the 480px square). Bounding on the clouds and cheering at the end, its clips
+  // made again in the cape (A, above); rolling and the rest stay its everyday ones.
+  const CAPED = { air: [], dive: [], crouch: [] };
+  for (const [k, n] of [['air', 3], ['dive', 2], ['crouch', 2]]) for (let i = 0; i < n; i++) { // (crouch_0, _1: V03, only the cape's tail blowing — the fox itself the same picture)
+    CAPED[k][i] = tailless(`assets/fox/halloween/${k}_${i}.webp`, MULTI && `assets/fox/notail/halloween/${k}_${i}.webp`, `halloween/${k}`, 0);
+  }
+  const caped = () => LOOK.night && CAPED.crouch[0].complete && CAPED.crouch[0].naturalWidth;
+  // by day, landed and sliding along: low, leaning forward, its tail streaming (the caped dive's pose without the cape,
+  // GPT: assets/fox/slide/slide_0, _1 — fitted over the same frame, so it's where the caped one is)
+  const SLIDE = [0, 1].map(i => { const im = pic(); im.src = `assets/fox/slide/slide_${i}.webp`; return im; });
+  // off the cloud road's edge: mid-bound from behind, its foot finding nothing, over to the side and down — four frames
+  // going over to its right (GPT, assets/fox/tip/tip_0…3); off the left, the same mirrored
+  const TIP = [0, 1, 2, 3].map(i => { const im = pic(); im.src = `assets/fox/tip/tip_${i}.webp`; return im; }), TIP_S = 0.09;
+  const tipping = () => TIP.every(im => im.complete && im.naturalWidth);
+  const sliding = () => SLIDE.every(im => im.complete && im.naturalWidth);
+  const capedOf = (k, t) => { // (its frames in turn — never still, the cape always streaming; crouched with only the one, leaning forward)
+    const fr = CAPED[k].filter(im => im.complete && im.naturalWidth);
+    return fr.length > 1 ? fr[Math.floor(t) % fr.length] : k === 'crouch' ? capedOf('dive', t) : fr[0];
+  };
+  // its tails: one in every picture of it already; the rest (as many as it has, TAILS) fanned out behind it from where
+  // that one grows (tools/tail_roots.py: found frame by frame in each clip), around the way it points — the pet's own
+  // tail pictures (assets/fox/tail/t1–t9), each swaying a little on its own; more tails, each a bit smaller (as the pet's)
+  let ROOTS = {}, PIVOT = [0.5, 1]; // (PIVOT: the point of a tail picture on its root, as parts of its side — set in tools/tail_anchor.html)
+  const json = u => fetch(u, { cache: 'no-cache' }).then(r => (r.ok ? r.json() : {})).catch(() => ({}));
+  Promise.all([json('assets/fox/tail_roots.json'), json('assets/fox/tail_anchors.json')]).then(([j, hand]) => { ROOTS = anchored(j, hand); PIVOT = hand._pivot || PIVOT; });
+  const TAIL_IMG = Array.from({ length: 9 }, (_, i) => { const im = new Image(); im.src = `assets/fox/tail/t${i + 1}.png`; return im; });
+  const TAIL_LEN = 0.42; // (a tail picture's side, of the fox's)
+  // (mode: 'still' — a slow sway; 'fly' — shaking fast in the wind; 'soar' — streaming in long waves. layer: 'behind'
+  // the body, the rest; 'front' — the main one, over the stub left at its root, where the picture's own was taken off)
+  const leans = new WeakMap(); // (how far round the way a tail picture goes leans, from its root: turned back by it)
+  function leanOf(im) {
+    if (!leans.has(im)) {
+      const c = document.createElement('canvas').getContext('2d', { willReadFrequently: true }); c.canvas.width = c.canvas.height = 64;
+      c.drawImage(im, 0, 0, 64, 64);
+      const d = c.getImageData(0, 0, 64, 64).data; let x = 0, y = 0, m = 0;
+      for (let v = 0; v < 64; v++) for (let u = 0; u < 64; u++) if (d[(v * 64 + u) * 4 + 3] > 128) { x += (u + 0.5) / 64 - PIVOT[0]; y += (v + 0.5) / 64 - PIVOT[1]; m++; }
+      leans.set(im, m ? Math.atan2(x, -y) * 180 / Math.PI : 0);
+    }
+    return leans.get(im);
+  }
+  function tails(img, x, y, sz, t, mode, layer = 'behind') {
+    const n = 1, r = img?.root && ROOTS[img.root[0]]?.[img.root[1]];
+    if (!r || !r[3] || (n < 2 && !img.cut)) return;
+    // (from the front or behind, its body in the way: fanned wider, round straight up, from a little higher up — and
+    // from the front all of them behind the body, from behind all of them over it)
+    const facing = /cheer|happy|joy|surprised|back_/.test(img.root[0]), back = /back_/.test(img.root[0]);
+    const front = facing && !back, mid = facing && n > 1 && r.length < 6 ? (front ? 5 : 10) : r[2], lift = r.length > 5 ? 0 : front ? 40 : facing ? 50 : 0; // (set by hand: right where it was put)
+    if (img.cut && facing ? (layer === 'front') !== back : layer === 'front' && !img.cut) return;
+    // (from the front, bigger and spread out flat to both sides, to show past its body)
+    const spread = Math.min(front ? 170 : facing ? 150 : 124, (front ? 22 : facing ? 20 : 17) * (n - 1)) * (r[6] ?? 1); // (× as set by hand)
+    const L = sz * (front ? 0.55 : TAIL_LEN) * Math.pow(0.85, Math.floor((n - 1) / 3)) * (r[5] ?? 1);
+    const ways = n === 1 ? [r[2]] : Array.from({ length: n }, (_, i) => mid - spread / 2 + spread * i / (n - 1));
+    const own = ways.reduce((b, a, i) => Math.abs(a - r[2]) < Math.abs(ways[b] - r[2]) ? i : b, 0); // (the one in the picture)
+    const all = img.cut && facing; // (every one of them drawn here, its own picture's one too — none left in it)
+    const order = layer === 'front' && !all ? [own] : ways.map((a, i) => i).filter(i => all || i !== own).sort((i, j) => Math.abs(ways[j] - mid) - Math.abs(ways[i] - mid)); // (outer first)
+    // (all swaying together, each a little of its own — never past the next: they may lie over each other, not cross)
+    const wobble = n > 1 ? Math.min(3, spread / (n - 1) * 0.3) : 0;
+    const sway = mode === 'soar' ? Math.sin(t * 9) * 10 : mode === 'fly' ? Math.sin(t * 19) * 6 + Math.sin(t * 31) * 3 : Math.sin(t * 2.2) * 5;
+    for (const i of order) {
+      const im = TAIL_IMG[i % 9]; if (!im.complete || !im.naturalWidth) continue;
+      const a = ways[i] + sway + wobble * Math.sin(t * (mode === 'still' ? 1.7 : 23) + i * 1.9) - leanOf(im);
+      g.save(); g.translate(x + r[0] / 480 * sz, y + (r[1] - lift) / 480 * sz); g.rotate(a * Math.PI / 180);
+      g.drawImage(im, -L * PIVOT[0], -L * PIVOT[1], L, L);
+      g.restore();
+    }
+  }
+  // gliding: the fox drawn in thin upright strips, those of its back half (its tail, and the cape's tail) each lifted
+  // a little on a wave running back along it — the further back, the more — so the tail streams; the front still
+  function waving(img, x, y, sz) {
+    const n = img.naturalWidth, back = 0.45, step = 4, k = sz / n; // (back: how far along from the left the tail reaches)
+    g.drawImage(img, n * back, 0, n * (1 - back), n, x + sz * back, y, sz * (1 - back), sz);
+    for (let sx = 0; sx < n * back; sx += step) {
+      const u = 1 - sx / (n * back), dy = Math.sin(S.t * 9 + u * 5) * sz * 0.035 * u * u;
+      g.drawImage(img, sx, 0, step + 1, n, x + sx * k, y + dy, (step + 1) * k, sz);
+    }
+  }
+  // its paraglider, gliding (off a squirrel, or a card's): unfolding over it, rippling in the wind (assets/fox/glider/0…2.png,
+  // GPT's, a frame each; a plain canopy drawn till they're there), its lines down to the fox, wind streaming past
+  const GLIDER = [];
+  function loadGlider() { return Promise.all([0, 1, 2].map(i => new Promise(done => { const im = pic(); im.onload = im.onerror = done; im.src = `assets/fox/glider/${i}.png`; GLIDER[i] = im; }))); }
+  function drawGlider(f, size) {
+    if (!f.soarAt) f.soarAt = S.t;
+    const open = Math.min(1, (S.t - f.soarAt) / 0.3), k = 1 - (1 - open) ** 3, sway = -0.42 * k + Math.sin(S.t * 3) * 0.05; // (blown back: at a slant behind it, swaying)
+    const w = size * 1.4 * k, h = w * 0.5, top = -size * 1.15 * k; // (for the wind streaks)
+    g.save(); g.translate(0, -size * 0.12); g.rotate(sway); g.scale(k, k); // (from where its lines meet, on its back)
+    const im = GLIDER[Math.floor(S.t * 9) % 3];
+    if (im?.complete && im.naturalWidth) { const iw = size * 1.4, ih = iw * im.height / im.width; g.drawImage(im, -iw * 0.485, -ih, iw, ih); }
+    else { // (till its pictures are in: a plain striped canopy, its edge rippling, and its lines)
+      const cols = ['#ff6b6b', '#ffd93d', '#6bcb77', '#4d96ff', '#b07cff'], cw = size * 1.4, ch = cw * 0.3, ct = -size * 1.1;
+      g.strokeStyle = 'rgba(90, 70, 60, 0.75)'; g.lineWidth = Math.max(1, size * 0.012);
+      for (const u of [-0.42, -0.15, 0.15, 0.42]) { g.beginPath(); g.moveTo(u * cw, ct + ch); g.lineTo(0, 0); g.stroke(); }
+      for (let i = 0; i < 5; i++) { const a0 = Math.PI * (1 + i / 5), a1 = Math.PI * (1 + (i + 1) / 5), rip = Math.sin(S.t * 18 + i) * ch * 0.08;
+        g.fillStyle = cols[i]; g.beginPath(); g.moveTo(0, ct + ch); g.ellipse(0, ct + ch, cw / 2, ch + rip, 0, a0, a1); g.closePath(); g.fill(); }
+    }
+    g.restore();
+    g.strokeStyle = 'rgba(255, 255, 255, 0.8)'; g.lineCap = 'round'; // (the wind going by)
+    for (let i = 0; i < 4; i++) { const u = (S.t * 2.2 + i * 0.27) % 1, y = top + h * (0.2 + i * 0.35) + Math.sin(i * 7) * size * 0.1, x = w * (0.8 - u * 1.9);
+      g.globalAlpha = Math.sin(u * Math.PI) * 0.8; g.lineWidth = Math.max(1.5, size * 0.02); g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x - w * 0.15, y - size * 0.03, x - w * 0.3, y); g.stroke(); }
+    g.globalAlpha = 1;
+  }
+  function drawFox(f, s) {
+    const p = toScreen(f.x, f.y), size = s * FOX_H * 1.25;
+    const inAir = S.phase === 'fly' && f.y > 0.05;
+    let img = null, rot = 0, front = false; // (front: a clip facing us — drawn upright, a little smaller)
+    if (S.phase === 'aim' || S.phase === 'idle') { img = A.pounce?.[Math.round(CROUCH[0] + (CROUCH[1] - CROUCH[0]) * S.power)] || A.run?.[0]; }
+    else if (S.phase === 'done') { img = frameOf(S.newBest ? 'cheer' : 'happy', S.t); front = true; }
+    else if (f.act && A[f.act.name]) {
+      img = frameOf(f.act.name, f.act.t); front = f.act.name !== 'roll';
+      if (f.act.name === 'roll') rot = f.spin * Math.PI * 2;
+    } else if (f.dive && A.pounce) { img = A.pounce[DIVE]; rot = -Math.atan2(f.vy, Math.max(4, f.vx)) * 0.7; }
+    else if (inAir && f.ride <= 0 && Math.hypot(f.vx, f.vy) > 8) { img = A.run?.[AIR]; // (slowing, hopping along low: its run, all the way — not a frame each hop)
+      rot = -Math.atan2(f.vy, Math.max(4, f.vx)) * 0.6 + f.spin * Math.PI * 2; }
+    else { img = A.run?.length ? (f.vx > 0.5 ? frameOf('run', S.t, 6 + f.vx) : A.run[0]) : null; }
+    { const v = Math.hypot(f.vx, f.vy); // (landed, sliding and hopping along low: leaning forward, as in the cape — not running)
+      if (!caped() && !front && S.phase === 'fly' && !f.act && !f.dive && !f.soar && v > 0.8 && !(inAir && v > 8) && sliding()) { img = SLIDE[Math.floor(S.t * (8 + v * 0.4)) % 2]; rot = 0; } }
+    if (caped() && !front && !(f.act?.name === 'roll')) { // (in the cape: diving, or leaping while well up; else crouched, its feet on the ground)
+      const v = Math.hypot(f.vx, f.vy), flap = S.t * (8 + v * 0.4), up = S.phase === 'fly' && f.y > 0.05 && v > 8; // (slowing down, hopping along: crouched, all the way — not a frame each hop)
+      const going = S.phase === 'fly' && v > 0.8; // (sliding or hopping along low: leaning forward, the cape streaming behind)
+      img = f.dive && up ? capedOf('dive', flap) : up && f.ride <= 0 ? capedOf('air', flap) : going ? capedOf('dive', flap) : capedOf('crouch', flap);
+      if (!up) rot = 0;
+    }
+    g.save(); g.translate(p.x, p.y - size * 0.45); g.rotate(rot);
+    if (S.ready && S.phase === 'fly') { // a golden glow while a super bounce is waiting
+      const k = 0.5 + Math.sin(S.t * 10) * 0.5, rg = g.createRadialGradient(0, 0, size * 0.1, 0, 0, size * 0.7);
+      rg.addColorStop(0, `rgba(255, 225, 77, ${0.5 + k * 0.3})`); rg.addColorStop(1, 'rgba(255, 225, 77, 0)');
+      g.fillStyle = rg; g.beginPath(); g.arc(0, 0, size * 0.7, 0, Math.PI * 2); g.fill();
+    }
+    if (f.dash > 0 || f.rainbow > 0) { g.shadowColor = f.rainbow > 0 ? '#fff' : '#ffb347'; g.shadowBlur = 24; }
+    const sz = front ? size * 0.9 : size;
+    const mode = S.phase !== 'fly' ? 'still' : f.soar && f.vy < 0 ? 'soar' : f.y > 0.05 || Math.abs(f.vx) > 3 ? 'fly' : 'still';
+    if (mode === 'soar' && !front) drawGlider(f, size); else f.soarAt = 0;
+    tails(img, -sz / 2, -sz * 449 / 480 + size * 0.45, sz, S.t, mode);
+    if (img?.complete && img.naturalWidth && f.soar && S.phase === 'fly' && !front) waving(img, -sz / 2, -sz * 449 / 480 + size * 0.45, sz); // (gliding: its tail streaming)
+    else if (img?.complete && img.naturalWidth) g.drawImage(img, -sz / 2, -sz * 449 / 480 + size * 0.45, sz, sz); // (feet at y 449 of 480)
+    else { g.font = `${Math.round(size * 0.6)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('🦊', 0, 0); }
+    tails(img, -sz / 2, -sz * 449 / 480 + size * 0.45, sz, S.t, mode, 'front');
+    g.restore();
+  }
+  // the background's strips (<dir>/index.json: those cut so far — clouds, far, trees, ground; .webp), tiled along the way
+  // (LOOK.lip: the ground strip's grassy top stands this much of its height over the ground line)
+  const BG = {};
+  async function loadBG() {
+    const look = LOOK; for (const k in BG) delete BG[k];
+    const r = await fetch(`${look.dir}/index.json`).catch(() => null);
+    for (const name of r?.ok ? await r.json() : []) { const im = pic(); im.onload = () => { if (LOOK === look) BG[name] = im; }; im.src = `${look.dir}/${name}.webp`; }
+  }
+  // on Halloween night the stars are sweets: a round one in its wrapper, twisted at both ends, in one of three colours
+  const CANDY = [['#ff8a2a', '#ffd08a'], ['#9a5cff', '#d9c2ff'], ['#45c46a', '#b8f0c4']];
+  function candy(x, y, r, seed) {
+    const [c, l] = CANDY[Math.abs(Math.floor(seed * 7)) % 3];
+    g.save(); g.translate(x, y); g.rotate(Math.sin(seed) * 0.5);
+    g.lineJoin = 'round'; g.lineWidth = Math.max(1.5, r * 0.12); g.strokeStyle = '#4a2a3a'; g.fillStyle = c;
+    for (const d of [-1, 1]) { g.beginPath(); g.moveTo(d * r * 0.7, 0); g.lineTo(d * r * 1.7, -r * 0.6); g.lineTo(d * r * 1.55, 0); g.lineTo(d * r * 1.7, r * 0.6); g.closePath(); g.fill(); g.stroke(); }
+    g.beginPath(); g.arc(0, 0, r, 0, 7); g.fill(); g.stroke();
+    g.strokeStyle = l; g.lineWidth = r * 0.22; g.lineCap = 'round'; // (its stripes, and a shine)
+    for (const o of [-0.4, 0.15]) { g.beginPath(); g.arc(0, 0, r * 0.62, Math.PI * (0.9 + o), Math.PI * (1.3 + o)); g.stroke(); }
+    g.fillStyle = '#ffffffcc'; g.beginPath(); g.arc(-r * 0.35, -r * 0.4, r * 0.16, 0, 7); g.fill();
+    g.restore();
+  }
+  // the night's moon, and its bats: a flock now and then, small and dark, flapping across far off
+  const bats = []; let batWait = 3;
+  function night(dt) {
+    const mx = W * 0.8, my = H * 0.17, mr = H * 0.075;
+    const glow = g.createRadialGradient(mx, my, mr * 0.8, mx, my, mr * 3);
+    glow.addColorStop(0, 'rgba(255, 240, 190, 0.35)'); glow.addColorStop(1, 'rgba(255, 240, 190, 0)');
+    g.fillStyle = glow; g.fillRect(mx - mr * 3, my - mr * 3, mr * 6, mr * 6);
+    g.fillStyle = '#fff4c8'; g.beginPath(); g.arc(mx, my, mr, 0, 7); g.fill();
+    g.fillStyle = '#f0e2a8'; for (const [ox, oy, r] of [[-0.3, -0.2, 0.18], [0.25, 0.3, 0.13], [0.35, -0.3, 0.09]]) { g.beginPath(); g.arc(mx + ox * mr, my + oy * mr, r * mr, 0, 7); g.fill(); }
+    if ((batWait -= dt) < 0) { // a flock off, from one side across to the other
+      batWait = 7 + Math.random() * 9;
+      const dir = Math.random() < 0.5 ? 1 : -1, y = H * (0.1 + Math.random() * 0.28), n = 5 + Math.floor(Math.random() * 6);
+      bats.push({ dir, y, t: 0, speed: W * (0.12 + Math.random() * 0.06), one: Array.from({ length: n }, () => ({ dx: Math.random() * W * 0.18, dy: (Math.random() - 0.5) * H * 0.1, k: Math.random() * 7, size: H * (0.012 + Math.random() * 0.01) })) });
+    }
+    g.fillStyle = '#120c24';
+    for (let i = bats.length - 1; i >= 0; i--) {
+      const fl = bats[i]; fl.t += dt;
+      const lead = fl.dir > 0 ? -W * 0.05 + fl.t * fl.speed : W * 1.05 - fl.t * fl.speed;
+      if (fl.t * fl.speed > W * 1.4) { bats.splice(i, 1); continue; }
+      for (const b of fl.one) {
+        const x = lead - fl.dir * b.dx, y = fl.y + b.dy + Math.sin(fl.t * 2 + b.k) * H * 0.012, a = Math.sin(fl.t * 16 + b.k), z = b.size;
+        g.beginPath(); // (wings up and down from the body)
+        g.moveTo(x - z * 0.3, y);
+        g.quadraticCurveTo(x - z * 1.2, y - z * 1.6 * a - z * 0.2, x - z * 2.2, y - z * 0.9 * a);
+        g.quadraticCurveTo(x - z * 1.3, y - z * 0.2 * a + z * 0.3, x, y + z * 0.4);
+        g.quadraticCurveTo(x + z * 1.3, y - z * 0.2 * a + z * 0.3, x + z * 2.2, y - z * 0.9 * a);
+        g.quadraticCurveTo(x + z * 1.2, y - z * 1.6 * a - z * 0.2, x + z * 0.3, y);
+        g.closePath(); g.fill();
+        g.beginPath(); g.ellipse(x, y + z * 0.1, z * 0.45, z * 0.6, 0, 0, 7); g.fill();
+      }
+    }
+  }
+  // a layer tiled across (y, h: where it is with the camera in close), going by at par of the ground's pace (plus drift
+  // px) — and zoomed with the camera as much as it's near: the ground (par 1) just as the fox and its friends, the
+  // trees (0.5) half as much, far hills and clouds hardly; round the fox's place on the screen, its bottom kept as far
+  // off the ground line as it is (so the friends stay standing on the ground, the trees behind them in step)
+  function strip(im, par, y, h, drift = 0) {
+    const z = Math.pow(S.cam.s / (H / CAM.metres), par), w = im.naturalWidth * h / im.naturalHeight, x0 = W * 0.3;
+    const at = S.cam.x * par * (H / CAM.metres) + drift; // (how far the layer has gone by, px with the camera in close)
+    const bottom = ground() - (ground() - (y + h)) * z, hz = h * z, wz = w * z;
+    for (let n = Math.floor((at - x0 / z) / w); (n * w - at) * z + x0 < W; n++) g.drawImage(im, (n * w - at) * z + x0, bottom - hz, wz + 1, hz);
+  }
+  // the little tree, GPT's (B02, docs/gpt_background.md): its roots and grass (the stump's top taken off) at the
+  // bottom, its leafy crown at the top where the fox sits, and between them its trunk, bent here — the stump's own
+  // bark (tree_trunk: a band of it straightened out, mirror-tiled up and down) laid along the bend in short slices,
+  // tapering a little from the stump's width (TREE_AT.w of the roots' picture) to the crown, the stump's outline down its sides
+  const TREE = {}, TREE_DAY = { x: -0.5, base: 2.2, cx: 0.523, cut: 0.404, w: 0.282, crown: 1.6, tipW: 0.36 }; // (m, and of the pictures)
+  let TREE_AT = TREE_DAY;
+  function loadTree() { // (B04 for Halloween: its own cut)
+    const look = LOOK; TREE_AT = { ...TREE_DAY, ...look.tree };
+    for (const k of ['base', 'crown', 'trunk']) { delete TREE[k]; const im = pic(); im.onload = () => { if (LOOK === look) TREE[k] = im; }; im.src = `${look.dir}/tree_${k}.webp`; }
+  }
+  function drawTree(tx, ty, s) {
+    const A_ = TREE_AT, bw = A_.base, bh = bw * TREE.base.naturalHeight / TREE.base.naturalWidth;
+    const b0 = toScreen(A_.x - bw / 2, bh - 0.1); // (its picture's top left; sunk a little into the ground)
+    const sx = A_.x + (A_.cx - 0.5) * bw, sy = bh * (1 - A_.cut) - 0.1;   // where the trunk comes out of the roots
+    const P = (u) => { // a point along the trunk (0 at the roots, 1 at the top), and its width
+      const cx = sx, cy = sy + (ty - sy) * 0.55, q = 1 - u;
+      return { x: q * q * sx + 2 * q * u * cx + u * u * tx, y: q * q * sy + 2 * q * u * cy + u * u * ty, w: A_.w * bw * q + A_.tipW * u };
+    };
+    const left = [], right = [];
+    for (let k = 0; k <= 16; k++) {
+      const u = k / 16, a = P(u), b = P(Math.min(1, u + 0.01)), c = P(Math.max(0, u - 0.01));
+      const dx = b.x - c.x, dy = b.y - c.y, n = Math.hypot(dx, dy) || 1; // (across the trunk there)
+      left.push(toScreen(a.x - dy / n * a.w / 2, a.y + dx / n * a.w / 2)); right.push(toScreen(a.x + dy / n * a.w / 2, a.y - dx / n * a.w / 2));
+    }
+    g.drawImage(TREE.base, b0.x, b0.y, bw * s, bh * s);
+    const T = TREE.trunk;
+    if (T) { // the bark, slice by slice up the bend
+      const rep = A_.w * bw * T.naturalHeight / T.naturalWidth; let v = 0; // (m of trunk per run of the bark picture)
+      for (let k = 0; k < 16; k++) {
+        const a = P(k / 16), b = P((k + 1) / 16), m = toScreen((a.x + b.x) / 2, (a.y + b.y) / 2);
+        const len = Math.hypot(b.x - a.x, b.y - a.y), w = (a.w + b.w) / 2;
+        const row = (v / rep % 1) * T.naturalHeight, sh = Math.min(T.naturalHeight - row, len / rep * T.naturalHeight);
+        g.save(); g.translate(m.x, m.y); g.rotate(Math.atan2(b.x - a.x, b.y - a.y));
+        g.drawImage(T, 0, row, T.naturalWidth, Math.max(1, sh), -w * s / 2, -len * s / 2 - 1, w * s, len * s + 2);
+        g.restore(); v += len;
+      }
+    } else {
+      g.beginPath(); left.forEach((p, i) => i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)); [...right].reverse().forEach(p => g.lineTo(p.x, p.y)); g.closePath();
+      g.fillStyle = '#b3623b'; g.fill();
+    }
+    g.strokeStyle = '#3a291c'; g.lineWidth = Math.max(2, s * 0.045); g.lineJoin = g.lineCap = 'round';
+    for (const side of [left, right]) { g.beginPath(); side.forEach((p, i) => i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)); g.stroke(); }
+    const cw = A_.crown, ch = cw * TREE.crown.naturalHeight / TREE.crown.naturalWidth, c = toScreen(tx - 0.1, ty - 0.15);
+    g.save(); g.translate(c.x, c.y); g.rotate((tx - PULL.rest[0]) * -0.12); // (leaning as it's pulled)
+    g.drawImage(TREE.crown, -cw * s / 2, -ch * s * 0.62, cw * s, ch * s);
+    g.restore();
+  }
+  function hills(par, col, amp, freq) {
+    g.fillStyle = col; g.beginPath(); g.moveTo(-20, ground());
+    for (let x = -20; x <= W + 20; x += 8) { const wx = x + S.cam.scroll * par; g.lineTo(x, ground() - amp * (0.6 + 0.4 * Math.sin(wx * freq) * Math.cos(wx * freq * 0.37))); }
+    g.lineTo(W + 20, ground()); g.fill();
+  }
+  function roundRect(x, y, w, h, r) { g.beginPath(); g.roundRect ? g.roundRect(x, y, Math.max(0, w), h, r) : g.rect(x, y, w, h); }
+
+  function hud() {
+    $('dist').textContent = Math.max(0, Math.floor(S.fox.x));
+    $('speed').textContent = Math.round((S.phase === 'sky' ? (S.sky.end && S.sky.leap < 0 ? SKY.speed * Math.max(0, 1 - S.sky.end.t / (2 * ROADEND.brake / SKY.speed)) : SKY.speed) : S.phase === 'fly' ? Math.hypot(S.fox.vx, S.fox.vy) : 0) * 3.6 * PACE); // (how fast it flies, km/h)
+    $('stars').textContent = S.got;
+    $('meterBar').style.width = `${(S.ready ? 1 : Math.min(1, S.meter / need())) * 100}%`;
+    $('starPill').classList.toggle('ready', S.ready);
+    $('frogPill').hidden = !S.frog;
+    const el = $('tails');
+    if (el.children.length !== DASHES) el.innerHTML = '<i>🔥</i>'.repeat(DASHES);
+    [...el.children].forEach((c, i) => c.classList.toggle('used', i >= S.dashes));
+  }
+
+  function end() {
+    S.phase = 'done'; S.t = 0;
+    const d = Math.floor(S.fox.x), isBest = d > best;
+    S.newBest = isBest;
+    // home with it: its stars and its farthest — to the pet that opened it, else kept here
+    if (opts.onEnd) opts.onEnd({ dist: d, stars: S.got, best: Math.max(best, d) });
+    else try { localStorage.setItem('ipet-fling-best', Math.max(best, d)); } catch (e) {}
+    $('final').textContent = d;
+    $('endTitle').textContent = isBest ? '🎉 新紀錄！' : '飛好遠！';
+    $('endNote').textContent = `撿到 ${star()} ${S.got} 顆，帶回家給小狐` + (isBest || !best ? '' : `（最遠 ${best} m）`);
+    if (energy) energyCard(energy.spend()); // (a fling's worth of energy spent: what's left, and whether there's enough for another)
+    best = Math.max(best, d);
+    hud();
+    setTimeout(() => { $('end').hidden = false; }, 1200); // (a moment to see it cheer first)
+  }
+  function start() {
+    S = fresh(); spawn(); hud(); deckUI();
+    const el = bgm?.el || bgm; if (el) try { el.currentTime = 0; } catch (e) {} // (a run: its music from the top)
+    bgm?.play()?.catch?.(() => {});
+    if (!params.has('nocards')) pick('start'); // (?nocards: straight to the fling)
+    $('end').hidden = true; $('energyNote').hidden = true; $('again').hidden = false; $('home').textContent = '回到小狐';
+    $('final').parentElement.hidden = false;
+  }
+  // the fox's energy (the pet's): each fling costs some, and under energy.least it'd rather go home and rest or eat —
+  // from the pet that opened it ({ get, spend, least }), or on its own page from the pet's own save, if there is one
+  let energy = null;
+  function petEnergy() {
+    const KEY = 'ipet-fox-v1', read = () => { try { return JSON.parse(localStorage.getItem(KEY)); } catch (e) { return null; } };
+    if (!read()?.stats) return null;
+    return {
+      least: 0, // (no limit while it's being tried out: 20 after)
+      get: () => Math.round(read()?.stats?.energy ?? 100),
+      spend: () => {
+        const p = read(); if (!p?.stats) return 100;
+        p.stats.energy = Math.max(0, p.stats.energy - 10);
+        try { localStorage.setItem(KEY, JSON.stringify(p)); } catch (e) {}
+        return Math.round(p.stats.energy);
+      },
+    };
+  }
+  function energyCard(left) {
+    const tired = left < energy.least;
+    $('energyNote').hidden = false;
+    $('energyNote').textContent = `⚡ 剩下的精力：${left}` + (tired ? '　小狐累了，回家睡一下或吃點東西吧～' : '');
+    $('energyNote').classList.toggle('tired', tired);
+    $('again').hidden = tired; $('home').textContent = tired ? '回家休息' : '回到小狐';
+  }
+  function tooTired() { // opened too tired to fly: only the card, saying so
+    $('pick').hidden = true; S.picking = false;
+    $('endTitle').textContent = '小狐好累…'; $('final').parentElement.hidden = true; $('endNote').textContent = '今天飛太多次了';
+    energyCard(energy.get()); $('end').hidden = false;
+  }
+  // before the fling: drag anywhere to pull the fox back, let go to fling it; after: a tap anywhere (but on the
+  // cards and buttons) is the one control. Space too (on the tree: a fling pulled 3/4 back at 45°)
+  layer.addEventListener('pointerdown', e => {
+    if (e.target.closest?.('.fl-card, button') || !S) return;
+    if (bgm?.paused) bgm.play().catch(() => {}); // (where it couldn't start by itself: on the first touch)
+    if (S.phase === 'aim') { S.drag = at(e); S.spring = null; }
+    else if (S.phase === 'sky') { if (S.sky.end) pickCard(cardAt(at(e))); else steer(at(e).x < W / 2 ? -1 : 1); } // (on the clouds: a lane to that side; at the end, a card)
+    else tap();
+  });
+  layer.addEventListener('pointermove', e => { if (S?.drag && S.phase === 'aim') pullTo(e); });
+  const up = () => { if (S?.drag) { S.drag = null; if (S.phase === 'aim') letGo(); } };
+  layer.addEventListener('pointerup', up); layer.addEventListener('pointercancel', up);
+  addEventListener('keydown', e => {
+    if (layer.hidden) return;
+    if (S?.picking) { const b = $('pickRow').children[+e.key - 1]; if (b) b.click(); return; } // (the cards: 1 2 3)
+    if (S?.sky?.end) { if (+e.key >= 1 && +e.key <= 3) pickCard(+e.key - 1); else if (e.code === 'Space') { e.preventDefault(); pickCard(Math.round(S.sky.x) + 1); } return; } // (at the cloud road's end: 1 2 3, or the one ahead)
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); steer(e.key === 'ArrowLeft' ? -1 : 1); return; }
+    if (e.code !== 'Space' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    if (S?.phase === 'aim') { const r = PULL.max * 0.75 / Math.SQRT2; S.pull = { x: -r, y: -r }; letGo(); } else tap();
+  });
+  $('again').addEventListener('click', start);
+  $('home').addEventListener('click', close);
+  $('close').addEventListener('click', close);
+  $('close2').addEventListener('click', close);
+
+  let raf = 0, last = 0;
+  function loop(now) {
+    const dt = Math.max(0, Math.min(0.05, (now - last) / 1000 || 0)); last = now;
+    if (S?.cutin) { // (the cut-in: all held, the world under it, then the burst)
+      draw(0); drawCutin();
+      if ((S.cutin.t += dt) >= CUTIN.dur) {
+        const { then, hit } = S.cutin; S.cutin = null; then();
+        if (hit) superBoost(); else if (hit === undefined) S.late = { until: S.t + TIMING.late }; // (not tapped yet: a moment more)
+      }
+    } else if (S) { step(dt * PACE); draw(dt * PACE); }
+    raf = requestAnimationFrame(loop);
+  }
+  // open: the layer over everything, landscape, a fresh run waiting on the start card.
+  // o: { tails, best, energy: { get, spend, least }, onEnd({ dist, stars, best }), onClose() } — none of it when on its own page
+  let bgm = null;
+  function music() { // the look's music, round and round while it's open (both PeriTune, peritune.com)
+    if (!LOOK.music) return;
+    bgm ||= window.Sound ? Sound.music(LOOK.music) : Object.assign(new Audio(LOOK.music), { loop: true, volume: 0.45 }); // (sound.js: as loud as the rest, on iPhones too)
+    bgm.play().catch(() => {});
+  }
+  // its pictures fetched only once it's wanted (opened), or a while after the pet's page is in — not at once with the
+  // pet's own: on a phone they'd fight over the network and the pet would take long to show
+  let warmed = null;
+  function warm() { return warmed ||= (loadTree(), Promise.all([loadClips(), loadBG(), loadFriends(), loadCutins(), loadCardArt(), loadGlider()]).catch(() => {})); }
+  // (the loading screen before it opens: progress(0…1) as its pictures come in; done when they all have)
+  async function preload(progress) {
+    let listed = false; Promise.all([warm(), looking]).then(() => { listed = true; });
+    for (;;) {
+      const f = LOADING.n ? LOADING.done / LOADING.n : 0;
+      progress(listed ? f : f * 0.9);
+      if (listed && LOADING.done >= LOADING.n) return;
+      await new Promise(r => setTimeout(r, 120));
+    }
+  }
+  addEventListener('ipet-in', () => setTimeout(warm, 4000)); // (preload.js: tapped in)
+  addEventListener('load', () => setTimeout(warm, 20000));
+  function open(o = {}) {
+    warm();
+    opts = o;
+    DASHES = Math.max(1, Math.min(30, +params.get('level') || o.level || 1)); // (?level=n to try)
+    best = o.best ?? (() => { try { return +localStorage.getItem('ipet-fling-best') || 0; } catch (e) { return 0; } })();
+    if (!layer.isConnected) document.body.appendChild(layer);
+    layer.hidden = false;
+    // fullscreen and locked to landscape where the phone allows it (from the tap that opened it); else it asks (CSS)
+    const fs = document.documentElement.requestFullscreen?.({ navigationUI: 'hide' });
+    Promise.resolve(fs).then(() => screen.orientation?.lock?.('landscape')).catch(() => {}).finally(resizeSoon);
+    resizeSoon();
+    energy = o.energy || petEnergy();
+    start(); // (straight onto the tree, to be pulled back)
+    if (energy && energy.get() < energy.least) tooTired();
+    music();
+    cancelAnimationFrame(raf); last = 0; raf = requestAnimationFrame(loop);
+  }
+  function close() {
+    cancelAnimationFrame(raf); raf = 0;
+    bgm?.pause();
+    layer.hidden = true; S = null;
+    if (opts.onClose) return opts.onClose(); // (back to the pet, landscape and fullscreen too: left as they are, no browser bars back in between)
+    try { screen.orientation?.unlock?.(); } catch (e) {}
+    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+    if (history.length > 1) history.back(); else location.href = 'index.html'; // (its own page: back where it came from)
+  }
+  window.Fling = { open, close, preload };
+  if (params.has('debug')) window.__fling = () => S; // (?debug: the run, to look into)
+  if (params.has('debug')) Fling.state = () => S; // (?debug: the run, to look at from the console)
+})();
+
+// the tail roots set by hand (tools/tail_anchor.html → assets/fox/tail_anchors.json: a few frames of a clip each,
+// [x, y, angle, facing us, size, fan, over]: size and fan ×, 1 as found; over 1: tails over it, turned away) in place of those found (tools/tail_roots.py): every frame as far off the found root as the anchors around it are, so it moves with the fox
+function anchored(roots, hand) {
+  for (const [clip, keys] of Object.entries(hand || {})) {
+    const ks = Object.keys(keys).map(Number).sort((a, b) => a - b), auto = roots[clip];
+    if (!ks.length || !auto) continue;
+    roots[clip] = auto.map((r, i) => {
+      const a = ks.filter(k => k <= i).pop() ?? ks[0], b = ks.find(k => k >= i) ?? a, A = keys[a], B = keys[b];
+      const u = a === b ? 0 : (i - a) / (b - a), at = j => A[j] + (B[j] - A[j]) * u;
+      // (where it is and the way it goes: as far off the found root as at the anchors, so it moves with the fox)
+      const off = (K, k) => { const q = auto[k] || r; return [K[0] - q[0], K[1] - q[1], ((K[2] - q[2] + 540) % 360) - 180]; };
+      const oa = off(A, a), ob = off(B, b), by = j => oa[j] + (ob[j] - oa[j]) * u;
+      const f = A.length > 6 ? (A[6] ? 'over' : at(3)) : r[4] === 'over' ? 'over' : A.length > 3 ? at(3) : r[4]; // (A[6]: its tails over it, or not)
+      const k = j => (A.length > j ? at(j) : 1);
+      return [r[0] + by(0), r[1] + by(1), r[2] + by(2), true, f, k(4), k(5)];
+    });
+  }
+  return roots;
+}
