@@ -69,6 +69,7 @@
   // lane first (over turn m), both lanes cloud a while (both m: the time to change lane), then its other edge in
   // after it. Off it (an edge past the fox's middle), the fox falls
   const FALL_IN = (-0.4 + Math.sqrt(0.16 + 4 * 9 * 0.9)) / 18; // (s off the edge: down to the sea of cloud, 0.9 lanes below — see the fall's lift)
+  const PICK_S = 5; // (the cards at the road's end: this long to tap one, then the highest is taken)
   const ROADEND = { cards: 7, brake: 22 }; // (braking to a stop over the road's last <brake> m; the cards floating <cards> m past its end, over the
   // sea of cloud — a tap on one, and off it leaps to it)
   const SKYSTARS = { first: 30, gap: 26, run: 5, step: 3, full: 0.9 }; // (its stars: a row of <run> along a lane every <gap> m; <full> of them a full bar: a gold card for sure)
@@ -482,23 +483,28 @@
     S.fox.up = null; // (bouncing off the ground afresh after it)
     const f = S.fox, fr = FRIENDS[a.kind];
     const dived = f.dive; // (diving onto it: a hedgehog knocked away, any other friend's throw the stronger)
+    if (S.recordLater) { S.recordLater = false; S.recordAt = S.t + 0.3; } // (the record broken up on the clouds: now, as it flies off this one)
     const combo = S.combo > 0; S.combo++; // (from a friend, not the ground)
     a.used = true; a.t = 0; f.y = box(a).h; f.hops = 0; f.glide = 0; f.ride = 0; f.dive = false; f.dash = 0; f.soar = false;
     dust(a.x, 0.2, 5);
-    const power = (S.ready && a.kind !== 'mushroom') || a.bunny; // a super bounce (the stars full; not off the mushroom / the witch's pot: its own bounce, the stars kept for the next), or a bunny bounce (a rabbit ran here first): as strong
-    if (power) { // (the bunny's first: the stars keep for the next)
-      const bunny = a.bunny;
-      if (bunny) a.bunny = false; else { S.ready = false; S.meter = 0; }
+    // a super bounce (the stars full; not off the mushroom / the witch's pot: its own bounce, the stars kept for the
+    // next) and a bunny bounce (a rabbit ran here first) — either as strong, both at once stronger still (one boost
+    // on the other); a dive onto it on top of that
+    // (a bunny bounce sets one off as it is: the friend's close-up, the ring — with the stars full too, both)
+    const bunny = a.bunny, sup = S.ready && a.kind !== 'mushroom', power = bunny || sup, boost = SUPER.boost ** ((bunny ? 1 : 0) + (sup ? 1 : 0));
+    if (power) {
+      a.bunny = false; if (sup) { S.ready = false; S.meter = 0; }
       const burst = () => {
-        f.rainbow = 2.2; S.shake = 0.5; if (bunny) SFX.super(); else SFX.boom();
-        pop(bunny ? 'BUNNY BOUNCE!' : 'SUPER BOUNCE!', a.x, fr.h + 2.5, bunny ? '#ffb3d9' : '#ffe14d', 1.3); confetti(a.x, fr.h + 1, 60); starBurst(a.x, fr.h + 0.5, 40, 13);
+        f.rainbow = 2.2; S.shake = 0.5; SFX.boom();
+        const word = bunny && sup ? 'BUNNY + SUPER!' : bunny ? 'BUNNY SUPER!' : 'SUPER BOUNCE!';
+        pop(word, a.x, fr.h + 2.5, sup ? '#ffe14d' : '#ffb3d9', 1.3); confetti(a.x, fr.h + 1, bunny && sup ? 90 : 60); starBurst(a.x, fr.h + 0.5, bunny && sup ? 56 : 40, 13);
       };
-      if (!bunny && cutinOf(a.kind)) { S.cutin = { kind: a.kind, t: 0, then: burst }; SFX.cutin(CUTIN.dur); } else burst(); // (a super bounce: the friend's close-up first, all held meanwhile)
+      if (cutinOf(a.kind)) { S.cutin = { kind: a.kind, t: 0, then: burst }; SFX.cutin(CUTIN.dur); } else burst(); // (a super bounce: the friend's close-up first, all held meanwhile)
     }
     if ((dived || power || S.mods.noTrip) && a.kind === 'hedgehog') { // (or a card: never tripped on it) // curled up and rolling off along the ground, knocking flying whoever it meets
       a.roll = true; a.speed = Math.max(ROLL.least, f.vx * 0.9); a.spin = 0;
       FRIENDS.mushroom.hit(f); f.vx *= DIVE_BOOST + S.mods.dive; f.vy *= DIVE_BOOST + S.mods.dive; // (off it as off a mushroom dived onto)
-      if (power) { f.vx *= SUPER.boost; f.vy *= SUPER.boost; }
+      if (power) { f.vx *= boost; f.vy *= boost; }
       SFX.big(); act('joy', 0.8); S.shake = Math.max(S.shake, 0.2);
       if (!power) pop('滾出去！', a.x, fr.h + 1.5, '#ffe14d');
       if (combo) comboUp(a, fr);
@@ -509,12 +515,13 @@
     if (pw > 1) { f.vx *= pw; f.vy *= pw; f.glide *= pw; f.ride *= pw; }
     if (M.glide[a.kind]) f.soar = true;
     if (M.hops[a.kind]) f.hops += M.hops[a.kind];
-    if (power) { f.vx *= SUPER.boost; f.vy *= SUPER.boost; f.glide *= SUPER.boost; f.ride *= SUPER.boost; if (f.hops) f.hops += SUPER.hops; }
+    if (power) { f.vx *= boost; f.vy *= boost; f.glide *= boost; f.ride *= boost; if (f.hops) f.hops += SUPER.hops; }
     if (dived && s !== 'ouch') { f.vx *= DIVE_BOOST + M.dive; f.vy *= DIVE_BOOST + M.dive; pop('強力！', a.x + 1, fr.h + 2.4, '#ffb347', 0.6); }
     if (combo && s !== 'ouch') comboUp(a, fr);
     if (s === 'ouch') S.combo = 0; // (tripped: no combo on from it)
     if (a.kind === 'rabbit') { // off ahead past two friends: the first knocked flying on the way, by the second it stops — a bunny bounce off that one
-      const [k, b] = S.friends.filter(o => !o.used && !o.bunny && o.x > a.x + 2);
+      const [k, ...on] = S.friends.filter(o => !o.used && !o.bunny && o.x > a.x + 2);
+      const b = on.find(o => o.kind !== 'rabbit' && o.kind !== 'mushroom'); // (never by another rabbit, nor the mushroom: on to the next friend)
       if (b) { b.bunny = true; a.runTo = b; a.knock = M.noKnock ? null : k; a.speed = Math.max(RABBIT.run, f.vx + 6); }
     }
     if (a.kind === 'frog') { S.frog = true; pop('俯衝落地彈更高！', a.x + 1, fr.h + 2.6, '#9be27a', 0.55); }
@@ -536,6 +543,7 @@
       if (fd.t >= FADE) S.fade = null;
     }
     S.t += dt;
+    if (S.recordAt && S.t >= S.recordAt && !S.record) { S.recordAt = 0; S.record = { t: 0 }; }
     S.shake = Math.max(0, S.shake - dt);
     const f = S.fox;
     if (f.act && (f.act.t += dt) > f.act.dur) f.act = null;
@@ -593,7 +601,7 @@
     }
     if (f.y > SKY.height && !(f.hold > 0) && !S.fade) S.fade = { t: 0, mid: toSky }; // high enough: up onto the clouds
     // past the farthest
-    if (!S.passedBest && f.x > best) { S.passedBest = true; SFX.best(); pop('新紀錄！', f.x, f.y + 3, '#ffe14d'); confetti(f.x, f.y + 2); }
+    if (!S.passedBest && f.x > best) { S.passedBest = true; SFX.best(); confetti(f.x, f.y + 2); if (best) S.record = { t: 0 }; } // (past the farthest yet: slow, "破紀錄！")
     friends(dt);
     spawn(); hud();
   }
@@ -655,6 +663,11 @@
       if (e.t < T) for (let n = Math.ceil(dt * 60 * (1 - e.t / T)) + 1; n-- > 0;) e.smoke.push({ x: sky.x + (Math.random() < 0.5 ? -0.17 : 0.17) + (Math.random() - 0.5) * 0.08, z: sky.z - 0.3, t: 0, r: 0.08 + Math.random() * 0.06, up: Math.random() * 0.25 });
       for (const p of e.smoke) p.t += dt; e.smoke = e.smoke.filter(p => p.t < 0.9);
       if (e.t >= T && e.stage === 'brake') e.stage = 'look';
+      if (e.stage === 'look' && (e.t - T) / PACE >= PICK_S && !(AUTO && params.has('hold'))) { // (seconds as on a clock: the game runs at PACE) // (five seconds and none tapped: the best of them)
+        const rank = { gold: 3, purple: 2, blue: 1 }; let best = 0;
+        sky.hand.forEach((c, i) => { if (rank[c.tier] > rank[sky.hand[best].tier]) best = i; });
+        pickCard(best);
+      }
       sky.x += (sky.lane - sky.x) * Math.min(1, dt * 12);
       if (AUTO && !params.has('hold') && e.stage === 'look' && e.t > T + 1.5) pickCard(Math.floor(Math.random() * 3)); // (?auto: one of them, by itself; ?hold: not)
       return hud();
@@ -669,7 +682,7 @@
       if (S.mods.shield) { S.mods.shield--; sky.lane = sky.x = Math.sign(sky.x); SFX.boing(); S.shake = 0.3; pop('救回來了！', S.fox.x, 3, '#9be7ff', 0.6); }
       else { sky.fall = 0; sky.fellAt = sky.x; SFX.whoosh(); return hud(); }
     }
-    if (!S.passedBest && f.x > best) { S.passedBest = true; SFX.best(); }
+    if (!S.passedBest && f.x > best) { S.passedBest = true; SFX.best(); if (best) S.recordLater = true; } // (up on the clouds: its slow motion kept till it's down, off the first friend)
     hud();
   }
   function fromSky(fell) { // off the cloud's end: down from on high, a giraffe right under it, the way on fresh from here
@@ -939,7 +952,8 @@
       if (look) sky.cardRects[i] = { x: cx - cw / 2, y, w: cw, h: cw * 1.3 };
     });
     if (look) { g.fillStyle = '#fff'; g.strokeStyle = '#7a6fd0'; g.lineWidth = Math.max(3, H * 0.008); g.font = `900 ${Math.round(H * 0.05)}px sans-serif`;
-      g.strokeText('點一張卡跳下去！', W / 2, top - H * 0.05); g.fillText('點一張卡跳下去！', W / 2, top - H * 0.05); }
+      const left = Math.max(0, Math.ceil(PICK_S - (e.t - T) / PACE)), say = `點一張卡跳下去！ ${left}`;
+      g.strokeText(say, W / 2, top - H * 0.05); g.fillText(say, W / 2, top - H * 0.05); }
   }
   function skyBar(sky) { // its star bar, along the top: full, a gold card at the end for sure (the fewer, the lower the cards)
     if (!sky.need || sky.end?.t > 2 * ROADEND.brake / SKY.speed * 0.6) return; // (gone as the cards come up)
@@ -1134,6 +1148,35 @@
     }))));
   }
   const cutinOf = k => (LOOK.friends && CUTINS[LOOK.friends]?.[k]) || CUTINS['assets/friends']?.[k] || null;
+  // past the farthest yet: the game slowed to a crawl a moment (eased back), a band across with the fox cheering on it
+  // and "破紀錄！" with the distance
+  // (the moment it crosses: the whole screen in slow motion at once; the band in a little after, once it's seen going over)
+  const RECORD = { dur: 2.1, band: 0.45, slow: t => t < 0.06 ? 1 - t / 0.06 * 0.88 : t < 1.4 ? 0.12 : 0.12 + 0.88 * Math.min(1, (t - 1.4) / 0.5) };
+  function drawRecord(r) {
+    const t = r.t - RECORD.band, into = Math.min(1, Math.max(0, t) / 0.18), away = Math.max(0, (r.t - (RECORD.dur - 0.3)) / 0.3), ease = k => 1 - (1 - k) ** 3;
+    if (t < 0) return; // (slowed first, nothing over it)
+    const bh = H * 0.34 * ease(into) * (1 - ease(away)), cy = H * 0.42, slant = H * 0.06; if (bh < 1) return;
+    g.save();
+    g.beginPath(); g.moveTo(0, cy - bh / 2 + slant); g.lineTo(W, cy - bh / 2 - slant); g.lineTo(W, cy + bh / 2 - slant); g.lineTo(0, cy + bh / 2 + slant); g.closePath();
+    const gr = g.createLinearGradient(0, 0, W, 0); gr.addColorStop(0, '#ffb347'); gr.addColorStop(0.5, '#ffe14d'); gr.addColorStop(1, '#ff7ab8');
+    g.fillStyle = gr; g.fill(); g.clip();
+    g.strokeStyle = 'rgba(255, 255, 255, 0.6)'; // (speed lines)
+    for (let i = 0; i < 18; i++) { const y = cy - bh / 2 + ((i * 53) % 100) / 100 * bh, len = W * 0.2, x = W - ((t * W * 3 + i * 197) % (W + len * 2)) + len;
+      g.lineWidth = 2 + (i % 3) * 2; g.beginPath(); g.moveTo(x, y); g.lineTo(x + len, y - len * 0.12); g.stroke(); }
+    const im = frameOf('cheer', t) || A.joy?.[0]; // (the fox, cheering, in from the left)
+    if (im?.complete && im.naturalWidth) { const sz = bh * 1.5, x = W * 0.2 - sz / 2 - (1 - ease(into)) * W * 0.4 + ease(away) * W; g.drawImage(im, x, cy - sz * 0.62, sz, sz); }
+    g.restore();
+    g.save(); g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
+    const fs = Math.round(H * 0.12 * (0.6 + 0.4 * ease(into))), x = W * 0.6 + ease(away) * W, wob = Math.sin(t * 14) * 0.04;
+    g.translate(x, cy - H * 0.03); g.rotate(-0.06 + wob);
+    g.font = `900 ${fs}px 'Arial Rounded MT Bold', 'Nunito', sans-serif`;
+    g.lineWidth = fs * 0.22; g.strokeStyle = '#b2402f'; g.strokeText('破紀錄！', 0, 0);
+    g.lineWidth = fs * 0.1; g.strokeStyle = '#fff'; g.strokeText('破紀錄！', 0, 0);
+    g.fillStyle = '#fff'; g.fillText('破紀錄！', 0, 0);
+    g.font = `900 ${Math.round(fs * 0.42)}px sans-serif`; g.lineWidth = fs * 0.1; g.strokeStyle = '#b2402f';
+    g.strokeText(`超過 ${best} m`, 0, fs * 0.78); g.fillText(`超過 ${best} m`, 0, fs * 0.78);
+    g.restore();
+  }
   function superBoost() { // tapped as the burst went: half as strong again
     const f = S.fox; f.vx *= TIMING.boost; f.vy *= TIMING.boost; f.glide *= TIMING.boost; f.ride *= TIMING.boost;
     S.shake = Math.max(S.shake, 0.6); f.rainbow = Math.max(f.rainbow, 2.6);
@@ -1652,7 +1695,11 @@
         const { then, hit } = S.cutin; S.cutin = null; then();
         if (hit) superBoost(); else if (hit === undefined) S.late = { until: S.t + TIMING.late }; // (not tapped yet: a moment more)
       }
-    } else if (S) { step(dt * PACE); draw(dt * PACE); }
+    } else if (S) {
+      const slow = S.record ? RECORD.slow(S.record.t) : 1; // (past the farthest: all slowed, a moment)
+      step(dt * PACE * slow); draw(dt * PACE * slow);
+      if (S.record) { drawRecord(S.record); if ((S.record.t += dt) >= RECORD.dur) S.record = null; }
+    }
     raf = requestAnimationFrame(loop);
   }
   // open: the layer over everything, landscape, a fresh run waiting on the start card.
