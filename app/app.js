@@ -357,9 +357,10 @@ function render() {
 /* ================= actions ================= */
 function addBond(n) { S.bond += n; }
 
-/* food bowl: meat or veggies. The fox loves both (the point: veggies are yummy too) and is happiest when it
-   gets both on the same day. The bowl is a layer in front of the fox; it shows assets/fox/food/<kind>_<3|2|1>.png
-   and empty.png once they are drawn, a simple drawn bowl until then. */
+/* food bowl: meat or veggies (or water). The fox loves both (the point: veggies are yummy too) and is happiest when
+   it gets both on the same day. The bowl is a layer in front of the fox; it shows assets/fox/food/<kind>_<3|2|1>.png
+   (meat, veg, water: GPT's sheet, tools/card_split-style) and empty.png — all fetched as the pet opens, so even the first
+   meal shows them (a simple drawn bowl only if one's missing). */
 const MEALS = { meat: { hunger: 30 }, veg: { hunger: 28, fun: 2 } };
 let eating = false;
 const foodArt = {};
@@ -381,6 +382,8 @@ function bowlSVG(kind, n) {
     <path d="M10 44 Q14 66 50 66 Q86 66 90 44 Z" fill="#fff6ea" stroke="#5a3a26" stroke-width="2"/>
     <circle cx="35" cy="56" r="3" fill="#f3a35b"/><circle cx="50" cy="58" r="3" fill="#f3a35b"/><circle cx="65" cy="56" r="3" fill="#f3a35b"/></svg>`;
 }
+const BOWLS = ['empty', ...['meat', 'veg', 'water'].flatMap(k => [1, 2, 3].map(n => `${k}_${n}`))];
+BOWLS.forEach(foodImg); // (fetched now: not the drawn bowl the first time it eats)
 function showBowl(kind, n) {
   const art = foodImg(n ? `${kind}_${n}` : 'empty');
   el.bowl.innerHTML = art ? `<img src="${art}" alt="">` : bowlSVG(kind, n);
@@ -396,14 +399,14 @@ async function drink() {
   eating = true;
   walkTarget = null;
   userWalkUntil = Date.now() + 20000;
-  el.bowl.innerHTML = '<img src="assets/scene/props/water.png" alt="">';
-  el.bowl.hidden = false;
-  el.bowl.classList.remove('out');
+  showBowl('water', 3);
   await eatClips();
   const anim = RENDER === 'anim' && window.Fox2D && Fox2D.canEat;
   if (anim) {
     Fox2D.drink(true);
-    await wait(4000 + rand(0, 2000));
+    const lap = 4000 + rand(0, 2000); // (the water going down as it laps: full, half, a little)
+    for (const n of [2, 1]) { await wait(lap / 3); showBowl('water', n); }
+    await wait(lap / 3);
     Fox2D.drink(false);
   } else { setExpr('eat', 3000); await wait(3000); }
   S.stats.fun = clamp(S.stats.fun + 2);
@@ -465,14 +468,14 @@ async function eat(kind) {
 
 const actions = {
   game(battle) { // the mini game, in a layer of its own over the pet (fling.js); the rhythm run, runner.html, from the menu (battle: flying with a parent, from its invite)
-    if (S.stats.energy < FLING_LEAST) { say(t('tooTiredToPlay'), 3000); setExpr('tired', 2200); return; } // (rest or a meal first)
+    if (!battle && S.stats.energy < FLING_LEAST) { say(t('tooTiredToPlay'), 3000); setExpr('tired', 2200); return; } // (rest or a meal first; flying with a parent, whatever)
     save();
     homeMusic.pause();
     // (the loading screen first, its pictures coming in; the tap in opens it — and goes fullscreen, where it can)
     Preload.run({ title: '小狐飛多遠', load: p => Fling.preload(p), go: () => Fling.open({
       level: level(), best: S.fling?.best || 0, battle,
       energy: { // a fling costs some energy, ended; under FLING_LEAST it'd rather go home and rest or eat
-        get: () => Math.round(S.stats.energy), least: FLING_LEAST,
+        get: () => Math.round(S.stats.energy), least: battle ? 0 : FLING_LEAST,
         spend: () => { S.stats.energy = clamp(S.stats.energy - FLING_ENERGY); save(); return Math.round(S.stats.energy); },
       },
       onEnd: r => { // home with it: the stars, the farthest, a bit of fun
@@ -841,23 +844,123 @@ function showPairing() {
   });
 }
 
-// a parent asking to fly together (parent.html → fling.html?battle=…, which rings this pet's room while it waits):
-// asked here — yes, and into the game in that battle
-let invited = null;
-function listenForInvites() {
-  const r = window.Link?.room?.('family-' + FAMILY); if (!r) return;
-  r.on('invite', m => {
-    if (!m.room || invited === m.room || !S.hatched || document.querySelector('.fl:not([hidden])')) return; // (asked already, or flying)
-    invited = m.room;
-    const d = document.createElement('div'); d.className = 'invite';
-    d.innerHTML = `<div><b>🦊 ${t('inviteFly', { from: (m.from || t('parents')).replace(/</g, '&lt;') })}</b><span><button class="go">${t('inviteGo')}</button><button class="later">${t('inviteLater')}</button></span></div>`;
-    document.body.appendChild(d); setExpr('happy', 2500);
-    const gone = () => d.remove();
-    d.querySelector('.later').onclick = gone;
-    d.querySelector('.go').onclick = () => { gone(); if (S.sleeping) actions.sleep?.(); actions.game({ room: m.room, name: S.name || t('foxName'), host: false }); };
-    setTimeout(() => { if (d.isConnected) { gone(); invited = null; } }, 60000); // (a minute unanswered: let go — asked again, it shows again)
-  });
+/* bound parents and challenges (link.js rooms: room family-<code>, Realtime broadcast, nothing stored there).
+   Bound: a parent page with this code says hi every few seconds (parent-hi { pid, name }) — knowing the code is the
+   binding, made once (scanning the QR code) and kept on both sides (here: ipet-parents) until undone: from here
+   (unpair: a new code, the old one no good any more, to bind again) or from the parent's page (unpair { pid }).
+   Flying together: either side challenges the other (challenge { room, from }, again every 1.5 s till answered);
+   the other is asked, and accepts (accept) or not (decline); accepted, both go into that battle — the parent's page
+   the host (fling.js battle). A child's challenge may reach two parents: the first to accept gets it (start { pid }). */
+const PARENTS_KEY = 'ipet-parents';
+let parents = (() => { try { return JSON.parse(localStorage.getItem(PARENTS_KEY)) || []; } catch (e) { return []; } })();
+const saveParents = () => { try { localStorage.setItem(PARENTS_KEY, JSON.stringify(parents)); } catch (e) {} renderBinding(); };
+const esc = s => String(s || '').replace(/[<&]/g, c => (c === '<' ? '&lt;' : '&amp;'));
+let famRoom = null, kidHiAt = 0, challenge = null;
+const answered = new Set(); // (challenges answered or let go: never asked twice)
+const thrice = (ev, m) => { for (const ms of [0, 300, 800]) setTimeout(() => famRoom?.send(ev, m), ms); };
+const flying = () => !!document.querySelector('.fl:not([hidden])');
+function renderBinding() {
+  const box = $('#pairState'); if (!box) return;
+  box.hidden = !parents.length;
+  $('#pairNames').textContent = parents.map(p => p.name || t('parents')).join('、');
+  $('#pairQrBox').open = !parents.length; // (bound: the QR code tucked away, for another parent)
+  $('#challengeBtn').hidden = !parents.length || !famRoom;
+  renderPush();
 }
+// notifications: a parent's challenge shows on this phone / tablet even with the pet closed (link.js push)
+function renderPush() {
+  const b = $('#pushBtn'), st = window.Link?.push?.state || 'no'; if (!b) return;
+  b.hidden = st === 'no';
+  b.disabled = st === 'on' || st === 'denied' || st === 'home';
+  b.textContent = t({ on: 'pushOn', off: 'pushOff', denied: 'pushDenied', home: 'pushHome' }[st] || 'pushOff');
+}
+async function enablePush(ask) {
+  if (!window.Link?.push) return;
+  const ok = await Link.push.enable([FAMILY], 'kid', S.name || '', ask);
+  renderPush();
+  if (ask && ok) say(t('pushDone'), 3000);
+}
+$('#pushBtn')?.addEventListener('click', () => enablePush(true));
+if (window.Link?.push?.state === 'on') enablePush(false); // (each time it opens: kept up to date)
+function popup(html, buttons) { // a card over the pet: { cls: label → fn }
+  const d = document.createElement('div'); d.className = 'invite';
+  d.innerHTML = `<div><b>${html}</b><span>${Object.entries(buttons).map(([k, [label]]) => `<button class="${k}">${label}</button>`).join('')}</span></div>`;
+  for (const [k, [, fn]] of Object.entries(buttons)) d.querySelector('.' + k).onclick = () => { d.remove(); fn?.(); };
+  document.body.appendChild(d);
+  return d;
+}
+const flyIn = room => { if (S.sleeping) actions.sleep?.(); actions.game({ room, name: S.name || t('foxName'), host: false }); };
+function listenForInvites() {
+  famRoom = window.Link?.room?.('family-' + FAMILY); if (!famRoom) return;
+  famRoom.on('parent-hi', m => {
+    if (!m.pid) return;
+    const had = parents.find(p => p.pid === m.pid), name = String(m.name || '').slice(0, 8);
+    if (!had) { parents.push({ pid: m.pid, name }); saveParents(); if (S.hatched) say(t('boundNow', { name: name || t('parents') }), 3000); }
+    else if (name && had.name !== name) { had.name = name; saveParents(); }
+    if (Date.now() - kidHiAt > 3000) { kidHiAt = Date.now(); famRoom.send('kid-hi', { name: S.name || t('foxName') }); } // (it's here: the parent's page shows so)
+  });
+  famRoom.on('unpair', m => { // a parent let go of this pet
+    if (!m.pid || !parents.some(p => p.pid === m.pid)) return;
+    parents = parents.filter(p => p.pid !== m.pid); saveParents();
+  });
+  // a parent's challenge: asked here — yes, and into the game in that battle
+  famRoom.on('challenge', m => {
+    if (m.kid || !m.room || answered.has(m.room) || !S.hatched || flying()) return; // (asked already, or flying)
+    answered.add(m.room);
+    setExpr('happy', 2500);
+    const d = popup(`🦊 ${t('inviteFly', { from: esc(m.from || t('parents')) })}`, {
+      go: [t('inviteGo'), () => { thrice('accept', { room: m.room }); flyIn(m.room); }],
+      later: [t('inviteLater'), () => thrice('decline', { room: m.room })],
+    });
+    d.dataset.room = m.room;
+    setTimeout(() => { if (d.isConnected) d.remove(); }, 180000); // (three minutes unanswered: let go)
+  });
+  famRoom.on('cancel', m => document.querySelector(`.invite[data-room="${m.room}"]`)?.remove()); // (called off over there)
+  // this pet's challenge answered by a parent
+  famRoom.on('accept', m => {
+    if (!challenge || m.room !== challenge.room || challenge.took) return;
+    challenge.took = m.pid || '?';
+    thrice('start', { room: m.room, pid: m.pid });
+    const room = challenge.room; endChallenge(); flyIn(room);
+  });
+  famRoom.on('decline', m => {
+    if (!challenge || m.room !== challenge.room) return;
+    endChallenge(); popup(t('challengeNo'), { later: [t('close')] });
+  });
+  renderBinding();
+}
+function challengeParents() { // 挑戰爸媽: asked on their page (open), every 1.5 s for a minute
+  if (!famRoom || challenge || flying()) return;
+  $('#menu').classList.add('hidden');
+  const room = Math.random().toString(36).slice(2, 10), from = S.name || t('foxName');
+  const wait = popup(`⏳ ${t('challengeWait')}`, { later: [t('cancel'), () => { thrice('cancel', { room }); endChallenge(); }] });
+  challenge = { room, wait, n: 0, timer: setInterval(() => { // (three minutes: time to come from the notification)
+    if (++challenge.n > 120) { endChallenge(); popup(t('challengeNone'), { later: [t('close')] }); return; }
+    famRoom.send('challenge', { room, from, kid: true });
+  }, 1500) };
+  famRoom.send('challenge', { room, from, kid: true });
+  Link.push?.send({ family: FAMILY, to: 'parent', title: t('pushToParent', { name: from }), body: t('pushTap'), url: 'parent.html', tag: 'challenge' });
+}
+function endChallenge() { if (!challenge) return; clearInterval(challenge.timer); challenge.wait?.remove(); challenge = null; }
+function unbindAll() { // a new code: the old one no good any more (the parents told), to bind again by scanning
+  if (!confirm(t('unbindAsk'))) return;
+  famRoom?.send('unpair', { code: FAMILY, kid: true }); thrice('unpair', { code: FAMILY, kid: true });
+  window.Link?.push?.drop(FAMILY); // (no notifications for the old code)
+  setTimeout(() => {
+    try { localStorage.setItem('ipet-family', newCode()); localStorage.removeItem(PARENTS_KEY); localStorage.removeItem('ipet-inbox-after'); } catch (e) {}
+    location.reload();
+  }, 1200);
+}
+$('#challengeBtn')?.addEventListener('click', challengeParents);
+// 我是家長: the parent's PIN, then the camera on the child's QR code — and on to the parent page in this same app
+// (an app on the home screen: the Camera app would open the link in Safari, paired there instead of here)
+$('#scanParent')?.addEventListener('click', async () => {
+  if (!window.Gate || !(await Gate.pin())) return;
+  const code = await Gate.scan(); if (!code) return;
+  if (code === FAMILY) { say(t('scanOwn'), 3000); return; } // (its own code: scanned off this very screen)
+  location.href = `parent.html?family=${code}`;
+});
+$('#unbindBtn')?.addEventListener('click', unbindAll);
 async function pollInbox() {
   if (!S.hatched) return;
   if (window.Link?.on) { // Supabase
@@ -1090,6 +1193,7 @@ $('#runnerBtn').addEventListener('click', () => { save(); location.href = 'runne
   for (const ev of ['click', 'pointerup', 'keydown']) document.addEventListener(ev, unlockAudio);
   $('#familyCode').textContent = FAMILY;
   showPairing();
+  listenForInvites(); // (at once, not after the pictures: a parent's hi / challenge reaches it from the start)
   I18N.apply();
   document.querySelectorAll('[data-lang]').forEach(b => b.addEventListener('click', () => { I18N.set(b.dataset.lang); render(); }));
   await loadAssets();
@@ -1103,7 +1207,6 @@ $('#runnerBtn').addEventListener('click', () => { save(); location.href = 'runne
   setInterval(chatter, 14000);
   setInterval(pollInbox, 4000);
   pollInbox();
-  listenForInvites();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }

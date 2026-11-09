@@ -334,6 +334,14 @@ body.admin .ff { display: inline-block; }
 .pair-qr svg { display: block; width: 100%; height: 100%; }
 .pair-qr:empty { display: none; }
 .pair small { color: var(--muted); line-height: 1.4; }
+.pair-state { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.pair-state p { margin: 0; }
+.pair details { display: flex; flex-direction: column; gap: 8px; align-items: center; text-align: center; width: 100%; }
+.pair details[open] { display: flex; }
+.pair details > * { margin: 6px auto; }
+.pair summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+.challenge-btn { background: #ffe9d6; font-weight: 800; }
+.challenge-btn[hidden] { display: none; }
 .pair button { width: 100%; }
 .role-link { color: var(--muted); font-size: 14px; text-decoration: underline; }
 
@@ -344,3 +352,5 @@ body.admin .ff { display: inline-block; }
 .invite span { display: flex; gap: 10px; justify-content: center; }
 .invite button { border: 0; border-radius: 999px; padding: 12px 20px; font: inherit; font-weight: 800; }
 .invite .go { background: #e8743b; color: #fff; } .invite .later { background: #f1e7dc; color: #3b2f2a; }
+.scan-btn { margin-top: 6px; background: #fff1e4; border: 1px dashed #e8a77a; }
+.pair-state[hidden], #pushBtn[hidden] { display: none; }

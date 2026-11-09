@@ -53,6 +53,7 @@
   // friend a rabbit ran ahead to) > a combo (onto a friend from a friend, the ground not touched between) > a tail.
   // A super / bunny bounce is the friend's own throw made stronger: boost times as fast, as long (an owl's carry, a
   // boar's ride), more hops off a frog; a hedgehog springs it up and rolls off as if dived onto
+  const DASH_STARS = 30; // stars caught for a dash used to come back
   const SUPER = { stars: 10, boost: 1.6, hops: 2 }; // stars for a super bounce; how much stronger; frog hops more
   const COMBO = 13;                                // a combo: this many m/s more, on the way the friend throws it
   const RABBIT = { run: 16, by: 1.4 };             // landed on, a rabbit runs ahead (at least this fast, m/s) to stand by the next friend
@@ -114,7 +115,7 @@
   const TIER = { blue: { w: 60, name: '藍' }, purple: { w: 30, name: '紫' }, gold: { w: 10, name: '金' } };
   const NAME = { rabbit: '兔子', frog: '青蛙', get mushroom() { return LOOK.night ? '魔女缸' : '蘑菇'; }, bear: '熊', owl: '貓頭鷹', giraffe: '長頸鹿', boar: '山豬', hedgehog: '刺蝟', squirrel: '松鼠' };
   const mods = () => ({ power: {}, weight: {}, glide: {}, hops: {}, noTrip: 0, noKnock: 0, refill: 0, again: 0, magnet: 0, superLess: 0,
-    launch: 0, dive: 0, ground: 0, combo: 0, shield: 0 });
+    launch: 0, dive: 0, ground: 0, combo: 0, shield: 0, revives: [] });
   const CARDS = [];
   const card = (id, tier, icon, badge, val, name, apply, when) => CARDS.push({ id, tier, icon, badge, val, name, apply, when, art: id.replace(/-(blue|purple|gold)$/, '') });
   // its picture, drawn for it (assets/cards/<art>.png: the three tiers of a card share one), where there is one — else its emoji
@@ -157,6 +158,11 @@
   card('combo', 'purple', () => '✨', '🔗', 'COMBO+', () => '連續踩朋友加更多速度', m => { m.combo += 6; });
   card('shield', 'gold', () => '☁️', '🛡️', '救一次', () => '雲路上掉下去救回來一次', m => { m.shield++; });
   card('tails', 'gold', () => '🔥', '➕', '+2', () => '多兩次噴射', m => { m.refill += 2; });
+  // 對戰 only, the middle one of the cloud road's three: the other fox, stopped, rescued (now, or the moment it stops) —
+  // this fox dropped from on high where they meet (blue: right over it; purple: halfway; gold: here), it brought there
+  // too; the two touching, 合體 — it up and off again (useRevive)
+  [['blue', '飛去對手那裡救牠'], ['purple', '兩人在中間會合'], ['gold', '對手來你這裡會合']].forEach(([t, say]) =>
+    card(`revive-${t}`, t, () => '🦊', '💖', '救援', () => say, m => { m.revives.push(t); }, 'battle'));
 
   function deal(when, weights = null, first = null) { // three different cards: each a tier drawn by its rarity (or by <weights>), then a card of it
     const pool = CARDS.filter(c => !c.when || c.when === when), hand = [];
@@ -171,7 +177,15 @@
     return hand;
   }
   // the cloud road's three, by how full its star bar got (0…1): full, a gold one for sure; the fewer, the lower
-  const dealSky = k => deal('cloud', { blue: 10 + 90 * (1 - k), purple: k < 0.3 ? 0 : 50 * k, gold: k < 0.6 ? 0 : 30 * k }, k >= 1 ? 'gold' : null);
+  const dealSky = k => {
+    const hand = deal('cloud', { blue: 10 + 90 * (1 - k), purple: k < 0.3 ? 0 : 50 * k, gold: k < 0.6 ? 0 : 30 * k }, k >= 1 ? 'gold' : null);
+    if (B) { // (a battle: a rescue card in the middle — its colour drawn, gold likelier the more stars were caught)
+      const w = { blue: 70 * (1 - k) + 10, purple: 30, gold: 5 + 65 * k }, sum = w.blue + w.purple + w.gold;
+      let r = Math.random() * sum, t = 'blue'; for (const x in w) if ((r -= w[x]) < 0) { t = x; break; }
+      hand[1] = CARDS.find(c => c.id === `revive-${t}`);
+    }
+    return hand;
+  };
   const cardHTML = (c, i) => `<button class="fl-cd fl-${c.tier}" data-i="${i}"><span class="fl-cd-ic">${artOf(c) ? `<img src="${artOf(c).src}" alt="">` : c.icon()}${c.badge && !artOf(c) ? `<i>${c.badge}</i>` : ''}</span>
     ${c.val ? `<b>${c.val}</b>` : ''}<small>${c.name()}</small><em>${TIER[c.tier].name}卡</em></button>`;
   let pickHand = null;
@@ -610,6 +624,9 @@
   }
   function starGot() { // a star caught (in the air or on the clouds): counted, and toward the super bounce
     S.got++; SFX.star();
+    if (S.got % DASH_STARS === 0 && S.dashes < DASHES) { // every 30 stars: a dash used comes back
+      S.dashes++; SFX.ready(); pop('噴射回復！', S.fox.x, S.fox.y + 2.2, '#ffb347', 0.7);
+    }
     for (let k = 0; k < 6; k++) S.glints.push({ x: (Math.random() - 0.5) * 1.3, y: (Math.random() - 0.5) * 1.1, t: -k * 0.05, r: 0.08 + Math.random() * 0.07, spin: Math.random() * 3 }); // (it sparkles)
     if (!S.ready && ++S.meter >= need()) {
       S.ready = true; SFX.ready();
@@ -669,7 +686,7 @@
       if (e.stage === 'look' && (e.t - T) / PACE >= PICK_S && !(AUTO && params.has('hold'))) { // (seconds as on a clock: the game runs at PACE) // (five seconds and none tapped: the best of them)
         const rank = { gold: 3, purple: 2, blue: 1 }; let best = 0;
         sky.hand.forEach((c, i) => { if (rank[c.tier] > rank[sky.hand[best].tier]) best = i; });
-        pickCard(best);
+        pickCard(B ? 1 : best); // (a battle: the rescue card in the middle)
       }
       sky.x += (sky.lane - sky.x) * Math.min(1, dt * 12);
       if (AUTO && !params.has('hold') && e.stage === 'look' && e.t > T + 1.5) pickCard(Math.floor(Math.random() * 3)); // (?auto: one of them, by itself; ?hold: not)
@@ -679,18 +696,17 @@
     if (sky.z >= brakeAt) { sky.end = { t: 0, stage: 'brake', to: sky.lane, pick: -1 }; sky.hand = dealSky(Math.min(1, sky.got / sky.need)); SFX.brake(); }
     if (AUTO) { const a = sky.stars.find(a => !a.got && a.z > sky.z - 1); if (a && a.z - sky.z < 20) sky.lane = a.lane; } // (?auto: off after the stars by itself, to try it)
     sky.x += (sky.lane - sky.x) * Math.min(1, dt * 12);
-    f.x = sky.x0 + sky.z;
+    f.x = sky.x0; // (the cloud road adds no distance: down off it where it went up)
     for (const a of sky.stars) if (!a.got && Math.abs(a.z - sky.z) < 1.5 && Math.abs(a.lane - sky.x) < 0.5) { a.got = true; sky.got++; starGot(); }
     if (Math.abs(sky.x) > 1.5) { // steered off the road's edge: down through the cloud (a card: saved once, back on it)
       if (S.mods.shield) { S.mods.shield--; sky.lane = sky.x = Math.sign(sky.x); SFX.boing(); S.shake = 0.3; pop('救回來了！', S.fox.x, 3, '#9be7ff', 0.6); }
       else { sky.fall = 0; sky.fellAt = sky.x; SFX.whoosh(); return hud(); }
     }
-    if (!S.passedBest && f.x > best) { S.passedBest = true; SFX.best(); if (best) S.recordLater = true; } // (up on the clouds: its slow motion kept till it's down, off the first friend)
     hud();
   }
   function fromSky(fell) { // off the cloud's end: down from on high, a friend right under it, the way on fresh from here
     const f = S.fox;                                     // (fallen off it: straight down from there, onto a friend)
-    f.x = S.sky.x0 + (fell ? S.sky.z : SKY.run); f.y = SKY.drop; f.vx = 0; f.vy = 0; f.up = null;
+    f.x = S.sky.x0; f.y = SKY.drop; f.vx = 0; f.vy = 0; f.up = null; // (no distance for the cloud road: down where it went up)
     S.sky = null; S.phase = 'fly';
     if (fell) { // (a friend right under it to catch it — one that throws it on, not a hedgehog or the sleeping bear)
       S.friends = []; S.stars = []; S.nextFriend = f.x + 12; S.nextStar = f.x + 4;
@@ -703,7 +719,6 @@
     const gi = { x: 0, x0: 0, y: 0, kind: under[Math.floor(Math.random() * under.length)], used: false, t: 0, carry: false, bunny: false };
     gi.x = gi.x0 = f.x - box(gi).cx; S.friends.push(gi); // (right under the fox)
     spawn(); act('joy', 0.8);
-    pop('+500 m！', f.x, f.y + 2.5, '#ffe14d', 1.1);
   }
 
   // knocked flying (by the rabbit running by, or the hedgehog rolling into it): off up and back, tumbling, out of
@@ -958,7 +973,12 @@
     });
     if (look) { g.fillStyle = '#fff'; g.strokeStyle = '#7a6fd0'; g.lineWidth = Math.max(3, H * 0.008); g.font = `900 ${Math.round(H * 0.05)}px sans-serif`;
       const left = Math.max(0, Math.ceil(PICK_S - (e.t - T) / PACE)), say = `點一張卡跳下去！ ${left}`;
-      g.strokeText(say, W / 2, top - H * 0.05); g.fillText(say, W / 2, top - H * 0.05); }
+      g.strokeText(say, W / 2, top - H * 0.05); g.fillText(say, W / 2, top - H * 0.05);
+      const r = B && sky.cardRects[1]; if (r) { // (a battle: the middle one taken by itself, its seconds on its corner)
+        const R = r.w * 0.16, x = r.x + r.w - R * 0.4, y = r.y + R * 0.4;
+        g.beginPath(); g.arc(x, y, R, 0, Math.PI * 2); g.fillStyle = '#ff5c7a'; g.fill(); g.lineWidth = R * 0.15; g.strokeStyle = '#fff'; g.stroke();
+        g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = `900 ${Math.round(R * 1.1)}px sans-serif`; g.fillText(left, x, y + R * 0.05);
+      } }
   }
   function skyBar(sky) { // its star bar, along the top: full, a gold card at the end for sure (the fewer, the lower the cards)
     if (!sky.need || sky.end?.t > 2 * ROADEND.brake / SKY.speed * 0.6) return; // (gone as the cards come up)
@@ -1653,15 +1673,20 @@
     const d = Math.floor(S.fox.x), isBest = d > best;
     S.newBest = isBest;
     // home with it: its stars and its farthest — to the pet that opened it, else kept here
-    if (opts.onEnd) opts.onEnd({ dist: d, stars: S.got, best: Math.max(best, d) });
+    const stars = S.got - (S.paid || 0); S.paid = S.got; // (rescued and down again: only what's new since)
+    if (opts.onEnd) opts.onEnd({ dist: d, stars, best: Math.max(best, d) });
     else try { localStorage.setItem('ipet-fling-best', Math.max(best, d)); } catch (e) {}
     $('final').textContent = d;
     $('endTitle').textContent = isBest ? '🎉 新紀錄！' : '飛好遠！';
     $('endNote').textContent = `撿到 ${star()} ${S.got} 顆，帶回家給小狐` + (isBest || !best ? '' : `（最遠 ${best} m）`);
-    if (energy) energyCard(energy.spend()); // (a fling's worth of energy spent: what's left, and whether there's enough for another)
+    if (energy && !S.spent) { S.spent = true; energyCard(energy.spend()); } // (a fling's worth of energy spent — once, rescued or not)
     best = Math.max(best, d);
     hud();
-    if (B) { B.mine = d; B.live = false; B.r.send('done', { dist: d }); setTimeout(result, 1200); return; } // (a battle: who flew farther, once both are down)
+    if (B) { // (a battle: who flew farther, once both are down; where it lies told, to be rescued there)
+      B.mine = d; B.live = false;
+      B.r.send('pos', { x: +S.fox.x.toFixed(2), y: 0, ph: 'done', d });
+      B.r.send('done', { dist: d }); setTimeout(result, 1200); return;
+    }
     setTimeout(() => { $('end').hidden = false; }, 1200); // (a moment to see it cheer first)
   }
   function start() {
@@ -1731,6 +1756,8 @@
   $('close2').addEventListener('click', close);
 
   let raf = 0, last = 0;
+  const requestAnimationFrame = params.has('bg') ? cb => setTimeout(() => cb(performance.now()), 16) : window.requestAnimationFrame.bind(window); // (?bg: frames on a timer — a tab out of sight, tried)
+  const cancelAnimationFrame = params.has('bg') ? clearTimeout : window.cancelAnimationFrame.bind(window);
   function loop(now) {
     const dt = Math.max(0, Math.min(0.05, (now - last) / 1000 || 0)); last = now;
     if (S?.cutin) { // (the cut-in: all held, the world under it, then the burst)
@@ -1798,7 +1825,34 @@
     });
     r.on('go', () => { if (!o.host && !b.count && !b.live) countDown(); });
     r.on('pos', m => { if (b.other) Object.assign(b.other, m); });
-    r.on('done', m => { if (b.theirs == null) { b.theirs = m.dist; if (b.mine != null) r.send('done', { dist: b.mine }); result(); } });
+    r.on('done', m => {
+      if (b.theirs != null) return;
+      b.theirs = m.dist; if (b.mine != null) r.send('done', { dist: b.mine });
+      result(); // (a rescue card in hand: used as soon as this fox can — battleTick)
+    });
+    // 救援: this fox stopped, the other's rescue (touched, or its card) — up and off again
+    r.on('revive', m => {
+      if (!S || S.phase !== 'done' || b.mine == null || m.id === b.revived) return;
+      b.revived = m.id; b.mine = null; b.live = true;
+      $('end').hidden = true;
+      const f = S.fox; Object.assign(f, { vx: 14, vy: 13, still: 0, up: null }); S.phase = 'fly'; S.t = 0;
+      SFX.dash(); SFX.perfect(); act('joy', 0.8); starBurst(f.x, f.y + 0.6, 40, 12);
+      pop(`${b.other?.name || '對手'}救了你！`, f.x, f.y + 2.8, '#ffb3d9', 1.2);
+      for (const ms of [0, 300, 800]) setTimeout(() => r.send('alive', { id: m.id }), ms);
+      if (m.how === 'duo') duoCutin(); // (met by its card: 合體 together)
+    });
+    r.on('meet', m => { // the other's rescue card: this fox, stopped, brought to where they'll meet, to wait for it there
+      if (!S || S.phase !== 'done' || b.mine == null || m.id === b.met) return;
+      b.met = m.id; const f = S.fox; f.x = m.x; f.y = 0; b.mine = Math.floor(f.x);
+      $('end').hidden = true; starBurst(f.x, 0.6, 30, 10); SFX.whoosh();
+      pop(`等 ${b.other?.name || '對手'} 來救你！`, f.x, 2.8, '#ffb3d9', 1.6);
+      for (const ms of [0, 300]) setTimeout(() => r.send('pos', { x: +f.x.toFixed(2), y: 0, ph: 'done', d: Math.floor(f.x) }), ms);
+    });
+    r.on('alive', m => { // the other fox rescued: not down any more
+      if (b.alive === m.id) return; b.alive = m.id;
+      b.theirs = null; if (b.other) b.other.ph = 'fly';
+      if (b.mine != null) { $('end').hidden = false; result(); } // (this one down already: waiting on it again)
+    });
     r.on('again', () => { b.again.them = true; rematch(); });
     r.on('combo', () => startCombo());
     r.on('combo-tap', m => { if (S?.cutin?.combo) S.cutin.theirs = !!m.hit; });
@@ -1822,9 +1876,42 @@
     } else pop(c.hit ? `${B.other?.name || '對手'}沒點到…` : '差一點！', f.x, f.y + 3, '#fff', 0.8);
   }
   function countDown() { B.count = BAT.count; B.live = false; SFX.ready(); }
+  // 救援: the other fox, stopped, sent up and off again (this fox touching it as it goes by, or a rescue card)
+  function rescue(how) {
+    if (!B || B.theirs == null) return false;
+    const id = Math.random().toString(36).slice(2, 8);
+    for (const ms of [0, 300, 800]) setTimeout(() => B?.r.send('revive', { id, how }), ms);
+    B.theirs = null; B.rescues = (B.rescues || 0) + 1;
+    const f = S.fox; SFX.perfect(); confetti(f.x, f.y + 1, 40);
+    pop(`救援 ${B.other?.name || '對手'}！`, f.x, f.y + 3, '#ffb3d9', 1.1);
+    return true;
+  }
+  // a rescue card held, the other fox down, this one flying: dropped from on high where they meet (blue: right over the
+  // other; purple: halfway; gold: here), the other brought there too; touching, 合體 (battleTick → rescue('duo'))
+  function useRevive() {
+    const f = S.fox, o = B.other, t = S.mods.revives.shift();
+    const x = t === 'blue' ? o.x : t === 'purple' ? (f.x + o.x) / 2 : f.x;
+    const id = Math.random().toString(36).slice(2, 8);
+    for (const ms of [0, 300, 800]) setTimeout(() => B?.r.send('meet', { id, x: +x.toFixed(2) }), ms);
+    o.x = x; o.y = 0; B.theirs = Math.floor(x); B.meet = true;
+    Object.assign(f, { x, y: SKY.drop * 0.6, vx: 0, vy: 0, hold: 0, glide: 0, ride: 0, hops: 0, dive: false, soar: false, dash: 0, up: null, still: 0 });
+    S.friends = S.friends.filter(a => Math.abs(a.x - x) > 4); S.nextFriend = Math.max(S.nextFriend, x + 10); // (nothing under it to land on first)
+    SFX.whoosh(); starBurst(f.x, f.y, 30, 10); pop(`救援卡！去救 ${o.name || '對手'}`, f.x, f.y + 2, '#ffb3d9', 1.2);
+  }
+  function reviveNow() { if (S?.mods?.revives?.length && B?.theirs != null && B.other && S.phase === 'fly' && !S.cutin && !S.fade && !B.meet) useRevive(); }
+  // 合體 by a rescue card: both foxes' cut-in (each tells the other its tap); off both go — both tapped right, as off
+  // the owl and half as hard again; else just up and on
+  function duoCutin() { S.cutin = { kind: 'combo', combo: true, t: 0, then: duoBurst }; SFX.cutin(CUTIN.dur); }
+  function duoBurst(c) {
+    const f = S.fox; Object.assign(f, { vx: 14, vy: 13, still: 0, up: null });
+    if (c.hit && c.theirs) {
+      FRIENDS.owl.hit(f); f.vx *= DUO.power; f.vy *= DUO.power; f.rainbow = 2.6; S.shake = 0.6; SFX.boom(); SFX.perfect();
+      starBurst(f.x, f.y + 0.6, 60, 16); confetti(f.x, f.y + 1, 90); pop('合體技！', f.x, f.y + 3.2, '#fff27a', 1.4);
+    } else { SFX.dash(); pop('一起飛！', f.x, f.y + 3, '#fff', 0.8); }
+  }
   function rematch() {
     if (!(B.again.me && B.again.them)) return;
-    B.again = { me: false, them: false }; B.mine = B.theirs = null; B.combo = false;
+    B.again = { me: false, them: false }; B.mine = B.theirs = null; B.combo = false; B.meet = false;
     if (B.other) Object.assign(B.other, { x: PULL.rest[0], y: PULL.rest[1], ph: 'aim', d: 0 });
     start(); countDown();
   }
@@ -1844,6 +1931,11 @@
     const o = B.other, f = S?.fox;
     if (B.live && f && o && !B.combo && !S.cutin && S.phase === 'fly' && o.ph === 'fly' && f.y > 0.3 && o.y > 0.3
       && Math.abs(f.x - o.x) < DUO.near[0] && Math.abs(f.y - o.y) < DUO.near[1]) { B.r.send('combo', {}); startCombo(); }
+    // 救援 by touch: going by the other fox where it lies stopped, low enough to reach it
+    if (f && o && B.theirs != null && S.phase === 'fly' && !S.cutin && Math.abs(f.x - o.x) < 1.6 && f.y < 2.5) {
+      if (B.meet) { B.meet = false; rescue('duo'); duoCutin(); } else rescue('touch'); // (its card: met there — 合體)
+    }
+    reviveNow();
     if (B.live && S && (B.sent += dt) >= BAT.every) {
       B.sent = 0; const f = S.fox;
       B.r.send('pos', { x: +f.x.toFixed(2), y: +f.y.toFixed(2), ph: S.phase, d: Math.max(0, Math.floor(f.x)) });
@@ -1864,14 +1956,15 @@
     g.save(); g.globalAlpha = 0.5;
     if (im?.complete && im.naturalWidth) g.drawImage(im, p.x - size / 2, p.y - size * 449 / 480, size, size);
     g.globalAlpha = 1; g.fillStyle = '#fff'; g.strokeStyle = '#7a3fd0'; g.lineWidth = 4; g.font = `800 ${Math.round(s * 0.42)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.strokeText(o.name, p.x, p.y - size * 1.0); g.fillText(o.name, p.x, p.y - size * 1.0);
+    const label = B.theirs != null && S.phase === 'fly' ? `${o.name} 🆘 碰我救我！` : o.name; // (stopped: go by it to rescue it)
+    g.strokeText(label, p.x, p.y - size * 1.0); g.fillText(label, p.x, p.y - size * 1.0);
     g.restore();
   }
   function drawBattle() { // over it all: the other's distance; waiting for it; the countdown
     if (!B) return;
     g.save(); g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
     const say = (t, y, fs, c = '#fff') => { g.font = `900 ${fs}px 'Arial Rounded MT Bold', 'Nunito', sans-serif`; g.lineWidth = fs * 0.2; g.strokeStyle = '#7a3fd0'; g.strokeText(t, W / 2, y); g.fillStyle = c; g.fillText(t, W / 2, y); };
-    if (B.other && (B.live || B.mine != null)) say(`🦊 ${B.other.name} ${B.theirs ?? B.other.d} m${B.theirs != null ? '（落地）' : ''}`, H * 0.16, Math.round(H * 0.045));
+    if (B.other && (B.live || B.mine != null) && !S?.sky?.end) say(`🦊 ${B.other.name} ${B.theirs ?? B.other.d} m${B.theirs != null ? '（落地）' : ''}`, H * 0.16, Math.round(H * 0.045));
     if (!B.other) say(`等${B.o.host ? '孩子' : '對手'}加入…`, H * 0.42, Math.round(H * 0.07));
     else if (B.count > 0) { const n = Math.ceil(B.count), k = B.count % 1; say(String(n), H * 0.45, Math.round(H * (0.2 + 0.1 * k)), '#ffe36e'); say(`和 ${B.other.name} 一起飛！`, H * 0.28, Math.round(H * 0.05)); }
     g.restore();
@@ -1889,7 +1982,7 @@
     resizeSoon();
     energy = o.energy || petEnergy();
     B?.close(); B = null;
-    const bo = o.battle || (params.get('battle') && { room: params.get('battle'), name: params.get('name') || '爸媽', host: params.has('invite'), invite: params.get('invite') });
+    const bo = o.battle || (params.get('battle') && { room: params.get('battle'), name: params.get('name') || '爸媽', host: params.has('host') || params.has('invite'), invite: params.get('invite') }); // (host: the parent's side, asked and answered already on parent.html; invite: ring the child from here, as before)
     if (bo) B = battle(bo);
     start(); // (straight onto the tree, to be pulled back)
     if (energy && energy.get() < energy.least) tooTired();
